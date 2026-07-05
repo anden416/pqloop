@@ -2,7 +2,7 @@
   "pqloop_version": "0.1.0",
   "name": "sports",
   "created": "2026-07-05T15:07:43+0200",
-  "updated": "2026-07-05T15:16:15+0200",
+  "updated": "2026-07-05T15:27:53+0200",
   "config": {
     "encoder": "libx264",
     "target_bitrate_kbps": 6000,
@@ -41,13 +41,13 @@
   "optimizer": {
     "current": {
       "preset": "medium",
-      "psy-rd": 0.0,
+      "psy-rd": 0.3,
       "aq-mode": 1,
-      "subme": 10,
+      "subme": 11,
       "aq-strength": 0.5,
       "rc-lookahead": 40,
-      "bframes": 3,
-      "qcomp": 0.7,
+      "bframes": 4,
+      "qcomp": 0.8,
       "refs": 3,
       "me": "hex",
       "trellis": 2,
@@ -55,7 +55,7 @@
       "merange": 16,
       "b-adapt": 2,
       "direct": "spatial",
-      "tune": null
+      "tune": "grain"
     },
     "cache": {
       "{\"aq-mode\": 1, \"aq-strength\": 1.0, \"b-adapt\": 1, \"bframes\": 3, \"deblock\": 0, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 1.0, \"qcomp\": 0.6, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 7, \"trellis\": 1}": {
@@ -797,96 +797,838 @@
           "objective": 94.2605
         },
         "error": ""
+      },
+      "{\"aq-mode\": 3, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 3, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 10, \"trellis\": 2}": {
+        "ok": true,
+        "objective": 94.2134,
+        "metrics": {
+          "vmaf_mean": 94.2134,
+          "vmaf_harmonic": 94.1188,
+          "vmaf_min": 82.3824,
+          "vmaf_p1": 86.4866,
+          "vmaf_p5": 89.2159,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5207.6,
+          "size_bytes": 13357400,
+          "encode_time_s": 14.47,
+          "encode_fps": 70.9,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.2134
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 3, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 50, \"refs\": 3, \"subme\": 10, \"trellis\": 2}": {
+        "ok": true,
+        "objective": 94.1764,
+        "metrics": {
+          "vmaf_mean": 94.1764,
+          "vmaf_harmonic": 94.0688,
+          "vmaf_min": 81.7419,
+          "vmaf_p1": 84.891,
+          "vmaf_p5": 88.724,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5134.1,
+          "size_bytes": 13168929,
+          "encode_time_s": 14.37,
+          "encode_fps": 71.4,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.1764
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 3, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 30, \"refs\": 3, \"subme\": 10, \"trellis\": 2}": {
+        "ok": true,
+        "objective": 94.2705,
+        "metrics": {
+          "vmaf_mean": 94.2705,
+          "vmaf_harmonic": 94.171,
+          "vmaf_min": 80.9334,
+          "vmaf_p1": 85.9893,
+          "vmaf_p5": 89.2579,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5235.3,
+          "size_bytes": 13428653,
+          "encode_time_s": 13.73,
+          "encode_fps": 74.8,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.2705
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 10, \"trellis\": 2}": {
+        "ok": true,
+        "objective": 94.4588,
+        "metrics": {
+          "vmaf_mean": 94.4588,
+          "vmaf_harmonic": 94.3671,
+          "vmaf_min": 83.5046,
+          "vmaf_p1": 86.9287,
+          "vmaf_p5": 89.4332,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5153.5,
+          "size_bytes": 13218713,
+          "encode_time_s": 13.74,
+          "encode_fps": 74.7,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.4588
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 5, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 10, \"trellis\": 2}": {
+        "ok": true,
+        "objective": 94.4668,
+        "metrics": {
+          "vmaf_mean": 94.4668,
+          "vmaf_harmonic": 94.3724,
+          "vmaf_min": 81.9474,
+          "vmaf_p1": 85.9353,
+          "vmaf_p5": 89.386,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 4993.8,
+          "size_bytes": 12809010,
+          "encode_time_s": 14.62,
+          "encode_fps": 70.2,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.4668
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"none\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 10, \"trellis\": 2}": {
+        "ok": true,
+        "objective": 94.4551,
+        "metrics": {
+          "vmaf_mean": 94.4551,
+          "vmaf_harmonic": 94.3745,
+          "vmaf_min": 84.8989,
+          "vmaf_p1": 87.3418,
+          "vmaf_p5": 89.814,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5214.2,
+          "size_bytes": 13374449,
+          "encode_time_s": 14.03,
+          "encode_fps": 73.1,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.4551
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"auto\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 10, \"trellis\": 2}": {
+        "ok": true,
+        "objective": 94.4506,
+        "metrics": {
+          "vmaf_mean": 94.4506,
+          "vmaf_harmonic": 94.3596,
+          "vmaf_min": 83.637,
+          "vmaf_p1": 86.7282,
+          "vmaf_p5": 89.4846,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5148.2,
+          "size_bytes": 13205187,
+          "encode_time_s": 13.6,
+          "encode_fps": 75.4,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.4506
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 10, \"trellis\": 2, \"tune\": \"film\"}": {
+        "ok": true,
+        "objective": 94.4443,
+        "metrics": {
+          "vmaf_mean": 94.4443,
+          "vmaf_harmonic": 94.352,
+          "vmaf_min": 82.8269,
+          "vmaf_p1": 86.4991,
+          "vmaf_p5": 89.2571,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5144.9,
+          "size_bytes": 13196761,
+          "encode_time_s": 13.67,
+          "encode_fps": 75.1,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.4443
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 10, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.6467,
+        "metrics": {
+          "vmaf_mean": 94.6467,
+          "vmaf_harmonic": 94.559,
+          "vmaf_min": 84.7104,
+          "vmaf_p1": 87.4008,
+          "vmaf_p5": 89.7083,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5149.0,
+          "size_bytes": 13207247,
+          "encode_time_s": 13.89,
+          "encode_fps": 73.9,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.6467
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 10, \"trellis\": 2, \"tune\": \"animation\"}": {
+        "ok": true,
+        "objective": 94.4727,
+        "metrics": {
+          "vmaf_mean": 94.4727,
+          "vmaf_harmonic": 94.3818,
+          "vmaf_min": 83.6757,
+          "vmaf_p1": 86.8369,
+          "vmaf_p5": 89.492,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5142.7,
+          "size_bytes": 13191035,
+          "encode_time_s": 14.26,
+          "encode_fps": 71.9,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.4727
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.727,
+        "metrics": {
+          "vmaf_mean": 94.727,
+          "vmaf_harmonic": 94.638,
+          "vmaf_min": 84.8481,
+          "vmaf_p1": 87.322,
+          "vmaf_p5": 89.7525,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5175.7,
+          "size_bytes": 13275569,
+          "encode_time_s": 14.93,
+          "encode_fps": 68.7,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.727
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2}": {
+        "ok": true,
+        "objective": 94.4724,
+        "metrics": {
+          "vmaf_mean": 94.4724,
+          "vmaf_harmonic": 94.3798,
+          "vmaf_min": 83.1851,
+          "vmaf_p1": 86.8594,
+          "vmaf_p5": 89.4731,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5159.7,
+          "size_bytes": 13234559,
+          "encode_time_s": 14.3,
+          "encode_fps": 71.7,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.4724
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"film\"}": {
+        "ok": true,
+        "objective": 94.4754,
+        "metrics": {
+          "vmaf_mean": 94.4754,
+          "vmaf_harmonic": 94.3815,
+          "vmaf_min": 83.4711,
+          "vmaf_p1": 86.9924,
+          "vmaf_p5": 89.349,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5153.0,
+          "size_bytes": 13217474,
+          "encode_time_s": 14.17,
+          "encode_fps": 72.4,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.4754
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"animation\"}": {
+        "ok": true,
+        "objective": 94.4812,
+        "metrics": {
+          "vmaf_mean": 94.4812,
+          "vmaf_harmonic": 94.3867,
+          "vmaf_min": 83.1316,
+          "vmaf_p1": 86.8039,
+          "vmaf_p5": 89.3574,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5158.6,
+          "size_bytes": 13231808,
+          "encode_time_s": 15.38,
+          "encode_fps": 66.7,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.4812
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 5, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.7302,
+        "metrics": {
+          "vmaf_mean": 94.7302,
+          "vmaf_harmonic": 94.6443,
+          "vmaf_min": 84.2899,
+          "vmaf_p1": 87.0951,
+          "vmaf_p5": 89.7351,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5007.8,
+          "size_bytes": 12844980,
+          "encode_time_s": 15.5,
+          "encode_fps": 66.2,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.7302
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 3, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.5256,
+        "metrics": {
+          "vmaf_mean": 94.5256,
+          "vmaf_harmonic": 94.4334,
+          "vmaf_min": 84.6438,
+          "vmaf_p1": 87.1559,
+          "vmaf_p5": 89.5838,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5204.4,
+          "size_bytes": 13349311,
+          "encode_time_s": 15.0,
+          "encode_fps": 68.4,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.5256
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.7, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.7, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.652,
+        "metrics": {
+          "vmaf_mean": 94.652,
+          "vmaf_harmonic": 94.5629,
+          "vmaf_min": 83.8967,
+          "vmaf_p1": 87.2331,
+          "vmaf_p5": 89.8103,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5205.0,
+          "size_bytes": 13350738,
+          "encode_time_s": 14.39,
+          "encode_fps": 71.3,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.652
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.778,
+        "metrics": {
+          "vmaf_mean": 94.778,
+          "vmaf_harmonic": 94.6928,
+          "vmaf_min": 85.266,
+          "vmaf_p1": 87.8031,
+          "vmaf_p5": 89.9996,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5198.6,
+          "size_bytes": 13334415,
+          "encode_time_s": 14.37,
+          "encode_fps": 71.4,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.778
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": 0, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.7436,
+        "metrics": {
+          "vmaf_mean": 94.7436,
+          "vmaf_harmonic": 94.6601,
+          "vmaf_min": 85.6795,
+          "vmaf_p1": 87.5931,
+          "vmaf_p5": 90.0038,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5191.3,
+          "size_bytes": 13315672,
+          "encode_time_s": 14.72,
+          "encode_fps": 69.7,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.7436
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -2, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.7701,
+        "metrics": {
+          "vmaf_mean": 94.7701,
+          "vmaf_harmonic": 94.6869,
+          "vmaf_min": 85.2102,
+          "vmaf_p1": 87.5826,
+          "vmaf_p5": 90.0308,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5185.1,
+          "size_bytes": 13299756,
+          "encode_time_s": 14.19,
+          "encode_fps": 72.3,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.7701
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.9173,
+        "metrics": {
+          "vmaf_mean": 94.9173,
+          "vmaf_harmonic": 94.8432,
+          "vmaf_min": 85.9791,
+          "vmaf_p1": 88.3127,
+          "vmaf_p5": 90.5307,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5220.9,
+          "size_bytes": 13391610,
+          "encode_time_s": 15.14,
+          "encode_fps": 67.8,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.9173
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.6, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.8939,
+        "metrics": {
+          "vmaf_mean": 94.8939,
+          "vmaf_harmonic": 94.826,
+          "vmaf_min": 86.1076,
+          "vmaf_p1": 88.507,
+          "vmaf_p5": 90.705,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5250.2,
+          "size_bytes": 13466812,
+          "encode_time_s": 15.04,
+          "encode_fps": 68.2,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.8939
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 1, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.5524,
+        "metrics": {
+          "vmaf_mean": 94.5524,
+          "vmaf_harmonic": 94.4814,
+          "vmaf_min": 84.6604,
+          "vmaf_p1": 88.248,
+          "vmaf_p5": 90.3577,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5128.8,
+          "size_bytes": 13155346,
+          "encode_time_s": 12.36,
+          "encode_fps": 83.0,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.5524
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 1, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.5554,
+        "metrics": {
+          "vmaf_mean": 94.5554,
+          "vmaf_harmonic": 94.4799,
+          "vmaf_min": 85.2649,
+          "vmaf_p1": 87.6217,
+          "vmaf_p5": 90.134,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5247.7,
+          "size_bytes": 13460467,
+          "encode_time_s": 13.1,
+          "encode_fps": 78.3,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.5554
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"dia\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.9253,
+        "metrics": {
+          "vmaf_mean": 94.9253,
+          "vmaf_harmonic": 94.8491,
+          "vmaf_min": 85.3106,
+          "vmaf_p1": 88.0458,
+          "vmaf_p5": 90.3621,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5217.2,
+          "size_bytes": 13382184,
+          "encode_time_s": 13.78,
+          "encode_fps": 74.4,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.9253
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"umh\", \"merange\": 16, \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.9417,
+        "metrics": {
+          "vmaf_mean": 94.9417,
+          "vmaf_harmonic": 94.868,
+          "vmaf_min": 85.8579,
+          "vmaf_p1": 88.4345,
+          "vmaf_p5": 90.497,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5233.2,
+          "size_bytes": 13423230,
+          "encode_time_s": 15.6,
+          "encode_fps": 65.8,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.9417
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"slow\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.9481,
+        "metrics": {
+          "vmaf_mean": 94.9481,
+          "vmaf_harmonic": 94.8753,
+          "vmaf_min": 85.783,
+          "vmaf_p1": 88.4018,
+          "vmaf_p5": 90.5817,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5222.8,
+          "size_bytes": 13396592,
+          "encode_time_s": 15.26,
+          "encode_fps": 67.2,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.9481
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"fast\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.9161,
+        "metrics": {
+          "vmaf_mean": 94.9161,
+          "vmaf_harmonic": 94.8433,
+          "vmaf_min": 85.3036,
+          "vmaf_p1": 88.2608,
+          "vmaf_p5": 90.6017,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5236.4,
+          "size_bytes": 13431379,
+          "encode_time_s": 14.59,
+          "encode_fps": 70.3,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.9161
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 4, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.9327,
+        "metrics": {
+          "vmaf_mean": 94.9327,
+          "vmaf_harmonic": 94.861,
+          "vmaf_min": 86.2172,
+          "vmaf_p1": 88.5083,
+          "vmaf_p5": 90.6515,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5215.6,
+          "size_bytes": 13378077,
+          "encode_time_s": 15.18,
+          "encode_fps": 67.6,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.9327
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 2, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.9193,
+        "metrics": {
+          "vmaf_mean": 94.9193,
+          "vmaf_harmonic": 94.8456,
+          "vmaf_min": 85.8631,
+          "vmaf_p1": 88.5251,
+          "vmaf_p5": 90.5664,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5221.5,
+          "size_bytes": 13393149,
+          "encode_time_s": 14.36,
+          "encode_fps": 71.4,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.9193
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 0, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.657,
+        "metrics": {
+          "vmaf_mean": 94.657,
+          "vmaf_harmonic": 94.5818,
+          "vmaf_min": 86.5271,
+          "vmaf_p1": 88.1607,
+          "vmaf_p5": 90.0077,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5122.8,
+          "size_bytes": 13139963,
+          "encode_time_s": 14.63,
+          "encode_fps": 70.1,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.657
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 2, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.8816,
+        "metrics": {
+          "vmaf_mean": 94.8816,
+          "vmaf_harmonic": 94.8095,
+          "vmaf_min": 85.8211,
+          "vmaf_p1": 88.1893,
+          "vmaf_p5": 90.5817,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5233.7,
+          "size_bytes": 13424561,
+          "encode_time_s": 14.42,
+          "encode_fps": 71.1,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.8816
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 3, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.909,
+        "metrics": {
+          "vmaf_mean": 94.909,
+          "vmaf_harmonic": 94.8352,
+          "vmaf_min": 84.8914,
+          "vmaf_p1": 88.007,
+          "vmaf_p5": 90.5971,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5253.8,
+          "size_bytes": 13476089,
+          "encode_time_s": 15.23,
+          "encode_fps": 67.3,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.909
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 50, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.9096,
+        "metrics": {
+          "vmaf_mean": 94.9096,
+          "vmaf_harmonic": 94.8337,
+          "vmaf_min": 83.9584,
+          "vmaf_p1": 87.228,
+          "vmaf_p5": 90.7533,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5189.3,
+          "size_bytes": 13310437,
+          "encode_time_s": 15.08,
+          "encode_fps": 68.1,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.9096
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 30, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.9156,
+        "metrics": {
+          "vmaf_mean": 94.9156,
+          "vmaf_harmonic": 94.8426,
+          "vmaf_min": 87.0036,
+          "vmaf_p1": 88.2765,
+          "vmaf_p5": 90.7259,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5230.5,
+          "size_bytes": 13416346,
+          "encode_time_s": 14.56,
+          "encode_fps": 70.5,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.9156
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"none\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.6015,
+        "metrics": {
+          "vmaf_mean": 94.6015,
+          "vmaf_harmonic": 94.5306,
+          "vmaf_min": 85.9624,
+          "vmaf_p1": 88.3787,
+          "vmaf_p5": 90.2213,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5236.6,
+          "size_bytes": 13431834,
+          "encode_time_s": 14.66,
+          "encode_fps": 70.0,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.6015
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 4, \"deblock\": -1, \"direct\": \"auto\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 11, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 94.9027,
+        "metrics": {
+          "vmaf_mean": 94.9027,
+          "vmaf_harmonic": 94.83,
+          "vmaf_min": 86.0017,
+          "vmaf_p1": 88.3212,
+          "vmaf_p5": 90.489,
+          "vmaf_frames": 1026,
+          "bitrate_kbps": 5220.9,
+          "size_bytes": 13391716,
+          "encode_time_s": 14.02,
+          "encode_fps": 73.2,
+          "over_target_pct": 0.0,
+          "penalty": 0.0,
+          "objective": 94.9027
+        },
+        "error": ""
       }
     },
     "sens": {
-      "preset": 0.0165,
-      "psy-rd": 0.0274,
+      "preset": 0.0083,
+      "psy-rd": 0.153,
       "aq-mode": 0.0,
-      "subme": 0.3164,
-      "aq-strength": 0.14,
+      "subme": 0.1192,
+      "aq-strength": 0.07,
       "rc-lookahead": 0.0,
-      "bframes": 0.0,
-      "qcomp": 0.0518,
-      "refs": 0.0004,
-      "me": 0.02,
-      "trellis": 0.0243,
-      "deblock": 0.0321,
+      "bframes": 0.0931,
+      "qcomp": 0.0769,
+      "refs": 0.0002,
+      "me": 0.01,
+      "trellis": 0.0121,
+      "deblock": 0.016,
       "merange": 0.0,
-      "b-adapt": 0.0267,
+      "b-adapt": 0.0134,
       "direct": 0.0,
-      "tune": 0.0
+      "tune": 0.0469
     },
     "best": {
       "params": {
-        "preset": "medium",
-        "psy-rd": 0.0,
+        "preset": "slow",
+        "psy-rd": 0.3,
         "aq-mode": 1,
         "subme": 11,
         "aq-strength": 0.5,
         "rc-lookahead": 40,
-        "bframes": 3,
-        "qcomp": 0.7,
+        "bframes": 4,
+        "qcomp": 0.8,
         "refs": 3,
         "me": "hex",
         "trellis": 2,
         "deblock": -1,
         "b-adapt": 2,
-        "direct": "spatial"
+        "direct": "spatial",
+        "tune": "grain"
       },
-      "objective": 94.2942,
+      "objective": 94.9481,
       "metrics": {
-        "vmaf_mean": 94.2942,
-        "vmaf_harmonic": 94.1945,
-        "vmaf_min": 83.0593,
-        "vmaf_p1": 86.4403,
-        "vmaf_p5": 89.1218,
+        "vmaf_mean": 94.9481,
+        "vmaf_harmonic": 94.8753,
+        "vmaf_min": 85.783,
+        "vmaf_p1": 88.4018,
+        "vmaf_p5": 90.5817,
         "vmaf_frames": 1026,
-        "bitrate_kbps": 5207.3,
-        "size_bytes": 13356796,
-        "encode_time_s": 14.84,
-        "encode_fps": 69.1,
+        "bitrate_kbps": 5222.8,
+        "size_bytes": 13396592,
+        "encode_time_s": 15.26,
+        "encode_fps": 67.2,
         "over_target_pct": 0.0,
         "penalty": 0.0,
-        "objective": 94.2942
+        "objective": 94.9481
       }
     },
     "screened": true,
-    "passes_done": 0,
-    "encodes": 37
+    "passes_done": 2,
+    "encodes": 74
   },
   "best": {
     "params": {
-      "preset": "medium",
-      "psy-rd": 0.0,
+      "preset": "slow",
+      "psy-rd": 0.3,
       "aq-mode": 1,
       "subme": 11,
       "aq-strength": 0.5,
       "rc-lookahead": 40,
-      "bframes": 3,
-      "qcomp": 0.7,
+      "bframes": 4,
+      "qcomp": 0.8,
       "refs": 3,
       "me": "hex",
       "trellis": 2,
       "deblock": -1,
       "b-adapt": 2,
-      "direct": "spatial"
+      "direct": "spatial",
+      "tune": "grain"
     },
-    "objective": 94.2942,
+    "objective": 94.9481,
     "metrics": {
-      "vmaf_mean": 94.2942,
-      "vmaf_harmonic": 94.1945,
-      "vmaf_min": 83.0593,
-      "vmaf_p1": 86.4403,
-      "vmaf_p5": 89.1218,
+      "vmaf_mean": 94.9481,
+      "vmaf_harmonic": 94.8753,
+      "vmaf_min": 85.783,
+      "vmaf_p1": 88.4018,
+      "vmaf_p5": 90.5817,
       "vmaf_frames": 1026,
-      "bitrate_kbps": 5207.3,
-      "size_bytes": 13356796,
-      "encode_time_s": 14.84,
-      "encode_fps": 69.1,
+      "bitrate_kbps": 5222.8,
+      "size_bytes": 13396592,
+      "encode_time_s": 15.26,
+      "encode_fps": 67.2,
       "over_target_pct": 0.0,
       "penalty": 0.0,
-      "objective": 94.2942
+      "objective": 94.9481
     }
   },
   "runs": [
@@ -900,6 +1642,28 @@
       "encodes": 23,
       "stop_reason": "interrupted",
       "elapsed_s": 237.4
+    },
+    {
+      "run_id": "20260705-151226_sports",
+      "started": "2026-07-05T15:12:26+0200",
+      "ended": "2026-07-05T15:20:44+0200",
+      "input": "input/France_vs_Croatia_WCFinal2018.ts",
+      "clip_start": 3908.0,
+      "clip_duration": 20.0,
+      "encodes": 29,
+      "stop_reason": "time_limit",
+      "elapsed_s": 498.0
+    },
+    {
+      "run_id": "20260705-152114_sports",
+      "started": "2026-07-05T15:21:14+0200",
+      "ended": "2026-07-05T15:27:53+0200",
+      "input": "input/France_vs_Croatia_WCFinal2018.ts",
+      "clip_start": 3908.0,
+      "clip_duration": 20.0,
+      "encodes": 22,
+      "stop_reason": "diminishing_returns",
+      "elapsed_s": 398.5
     }
   ]
 }

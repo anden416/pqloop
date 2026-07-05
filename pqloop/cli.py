@@ -445,6 +445,7 @@ def cmd_encode(a) -> int:
                           fmt=a.format, hls_segment_type=a.hls_segment_type,
                           audio_kbps=parse_bitrate_kbps(a.audio_bitrate),
                           want_audio=not a.no_audio,
+                          start=parse_time_seconds(a.start) if a.start else None,
                           duration=a.duration, log=log)
     log(f"done: {result['output']}  ({result['segments']} media files, "
         f"GOP {result['gop']} @ {result['fps']:g}fps"
@@ -583,7 +584,8 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--target-bitrate", help="override preset bitrate")
     e.add_argument("--audio-bitrate", default="128", help="audio kbps (default 128)")
     e.add_argument("--no-audio", action="store_true")
-    e.add_argument("--duration", type=float, help="only encode the first N seconds")
+    e.add_argument("--start", help="start position in the input (seconds or HH:MM:SS)")
+    e.add_argument("--duration", type=float, help="only encode N seconds")
     e.add_argument("--record-duration", type=float, help="live input: seconds to record")
     e.add_argument("--ffmpeg")
     e.set_defaults(func=cmd_encode)

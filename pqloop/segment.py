@@ -10,7 +10,7 @@ from . import media
 
 def final_encode(ff, space, params, cfg, source, out_dir, fmt="hls",
                  hls_segment_type="fmp4", audio_kbps=128, want_audio=True,
-                 duration=None, log=None) -> dict:
+                 start=None, duration=None, log=None) -> dict:
     """Encode `source` (a local file; live inputs are captured first by the CLI)
     with the tuned parameters into segmented HLS/DASH (or plain MP4)."""
     out_dir = Path(out_dir)
@@ -35,7 +35,10 @@ def final_encode(ff, space, params, cfg, source, out_dir, fmt="hls",
     )
     gop_len = max(1, int(round(seg * fps)))
 
-    args = ["-y", "-i", source.path]
+    args = ["-y"]
+    if start:
+        args += ["-ss", f"{float(start):.3f}"]
+    args += ["-i", source.path]
     if duration:
         args += ["-t", f"{float(duration):.3f}"]
     args += ["-map", "0:v:0"]
