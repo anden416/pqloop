@@ -35,6 +35,7 @@ CONFIG_DEFAULTS = {
     "bufsize_ratio": 2.0,
     "bitrate_tolerance": 0.05,
     "overshoot_penalty": 1.0,
+    "undershoot_penalty": 0.0,
     "seg_duration": 4.0,
     "pix_fmt": "yuv420p",
     "scale": "",
@@ -48,6 +49,8 @@ CONFIG_DEFAULTS = {
     "clip_start": 0.0,
     "clip_duration": 30.0,
     "capture_duration": None,
+    "program": None,
+    "reuse_capture": False,
     "extra_video_args": [],
     "extra_input_args": [],
     "ffmpeg": "ffmpeg",
@@ -103,6 +106,47 @@ def parse_freezes(space, cfg_frozen, freeze_args, unfreeze_args) -> dict:
     return frozen
 
 
+# Config keys that change what a cached objective value means. When any of
+# them changes, cached trial scores are no longer comparable and must be
+# dropped (encoder is included because cache signatures are bare param dicts
+# and e.g. x264/x265 share parameter names).
+OBJECTIVE_KEYS = ("encoder", "target_bitrate_kbps", "maxrate_ratio",
+                  "bufsize_ratio", "bitrate_tolerance", "overshoot_penalty",
+                  "undershoot_penalty", "seg_duration", "pix_fmt", "scale",
+                  "metric", "vmaf_model", "vmaf_subsample", "two_pass",
+                  "extra_video_args")
+
+
+def objective_key(cfg) -> str:
+    return json.dumps({k: cfg.get(k) for k in OBJECTIVE_KEYS}, sort_keys=True)
+
+
+def reset_stale_state(data, opt_state, fingerprint, okey, log_fn=log) -> list:
+    """Drop cached trials/best when the reference clip or the objective
+    definition changed since the preset was last saved; the current point and
+    sensitivity ordering are kept as priors either way. Presets from before
+    objective-key tracking are grandfathered (key stored, nothing reset)."""
+    reasons = []
+    if data.get("fingerprint") and data["fingerprint"] != fingerprint:
+        reasons.append("reference clip changed")
+    if data.get("objective_key") is None:
+        if opt_state.get("cache"):
+            log_fn("note: preset predates objective-key tracking; "
+                   "adopting the current objective settings as its baseline")
+    elif data["objective_key"] != okey:
+        reasons.append("objective settings changed")
+    if reasons:
+        log_fn(f"{' and '.join(reasons)} since last run -> scores reset "
+               "(best parameters and impact ordering carried over)")
+        opt_state.pop("cache", None)
+        opt_state.pop("best", None)
+        opt_state["screened"] = False
+        opt_state["passes_done"] = 0
+    data["fingerprint"] = fingerprint
+    data["objective_key"] = okey
+    return reasons
+
+
 def resolve_measure_ff(cfg, log_fn=log):
     candidates = []
     for cand in (cfg.get("vmaf_ffmpeg"), cfg.get("ffmpeg"), "ffmpeg"):
@@ -133,12 +177,18 @@ def prepare_source(ff, cfg, input_url, workdir, capture_name="capture.ts"):
     if media.is_live_url(input_url):
         seconds = cfg.get("capture_duration") or (
             float(cfg["clip_start"]) + float(cfg["clip_duration"]) + 2.0)
-        captured = media.capture_live(ff, input_url, float(seconds),
-                                      Path(workdir) / capture_name,
-                                      cfg.get("extra_input_args") or [], log)
+        if float(seconds) < float(cfg["clip_start"]) + float(cfg["clip_duration"]):
+            log(f"warning: --capture-duration {seconds:g}s is shorter than "
+                f"clip start + duration; the reference clip will be cut short")
+        captured = media.get_or_capture_live(
+            ff, input_url, float(seconds), Path(workdir) / capture_name,
+            cfg.get("extra_input_args") or [],
+            program=cfg.get("program"),
+            reuse=bool(cfg.get("reuse_capture")), log=log)
+        # the capture is a single-program TS, so no program selection here
         src = media.probe_file(ff, captured)
         return src, True
-    src = media.probe_file(ff, input_url)
+    src = media.probe_file(ff, input_url, program=cfg.get("program"))
     return src, False
 
 
@@ -158,6 +208,7 @@ def cmd_optimize(a) -> int:
         "bufsize_ratio": a.bufsize_ratio,
         "bitrate_tolerance": a.bitrate_tolerance,
         "overshoot_penalty": a.overshoot_penalty,
+        "undershoot_penalty": a.undershoot_penalty,
         "seg_duration": a.seg_duration,
         "pix_fmt": a.pix_fmt,
         "scale": a.scale,
@@ -171,6 +222,8 @@ def cmd_optimize(a) -> int:
         "clip_start": parse_time_seconds(a.clip_start) if a.clip_start is not None else None,
         "clip_duration": a.clip_duration,
         "capture_duration": a.capture_duration,
+        "program": a.program,
+        "reuse_capture": a.reuse_capture,
         "extra_video_args": shlex.split(a.extra_video_args) if a.extra_video_args else None,
         "extra_input_args": shlex.split(a.extra_input_args) if a.extra_input_args else None,
         "ffmpeg": a.ffmpeg,
@@ -197,11 +250,16 @@ def cmd_optimize(a) -> int:
         raise ValueError("no target bitrate: pass --target-bitrate, e.g. -b 6000k")
 
     space = get_space(cfg["encoder"])
+    if space.experimental:
+        log(f"WARNING: the {cfg['encoder']!r} parameter space is EXPERIMENTAL "
+            f"(not yet validated on hardware) — check commands with --dry-run first.")
     cfg["frozen"] = parse_freezes(space, cfg.get("frozen"), a.freeze, a.unfreeze)
     data["config"] = cfg
 
     ff_enc = FF(cfg["ffmpeg"] or "ffmpeg", cfg["ffprobe"] or None)
-    if not ff_enc.has_encoder(cfg["encoder"]):
+    # --dry-run may legitimately run on a box without the target encoder
+    # (e.g. checking a netint command before moving to Quadra hardware)
+    if not a.dry_run and not ff_enc.has_encoder(cfg["encoder"]):
         raise RuntimeError(f"encoder {cfg['encoder']!r} not available in "
                            f"{cfg['ffmpeg']} ({ff_enc.version()})")
     ff_meas = resolve_measure_ff(cfg)
@@ -212,20 +270,13 @@ def cmd_optimize(a) -> int:
     src, was_live = prepare_source(ff_enc, cfg, input_url, workdir)
     mezz = media.get_or_build_mezzanine(
         mezz_builder_ff(ff_enc, ff_meas), src,
-        start=0.0 if was_live else float(cfg["clip_start"]),
+        start=float(cfg["clip_start"]),
         duration=float(cfg["clip_duration"]),
         deint=cfg["deinterlace"], deint_mode=cfg["deint_mode"],
         out_path=workdir / "mezz.mkv", log=log)
 
     opt_state = dict(data.get("optimizer") or {})
-    if data.get("fingerprint") and data["fingerprint"] != mezz.fingerprint:
-        log("reference clip changed since last run -> scores reset "
-            "(best parameters and impact ordering carried over)")
-        opt_state.pop("cache", None)
-        opt_state.pop("best", None)
-        opt_state["screened"] = False
-        opt_state["passes_done"] = 0
-    data["fingerprint"] = mezz.fingerprint
+    reset_stale_state(data, opt_state, mezz.fingerprint, objective_key(cfg), log)
 
     if not space.params:
         log(f"note: no curated parameter space for {cfg['encoder']!r}; only the "
@@ -238,6 +289,7 @@ def cmd_optimize(a) -> int:
         bufsize_ratio=float(cfg["bufsize_ratio"]),
         bitrate_tolerance=float(cfg["bitrate_tolerance"]),
         overshoot_penalty=float(cfg["overshoot_penalty"]),
+        undershoot_penalty=float(cfg["undershoot_penalty"]),
         seg_duration=float(cfg["seg_duration"]),
         pix_fmt=cfg["pix_fmt"], scale=cfg["scale"], metric=cfg["metric"],
         vmaf_model=cfg["vmaf_model"], vmaf_subsample=int(cfg["vmaf_subsample"]),
@@ -259,7 +311,8 @@ def cmd_optimize(a) -> int:
 
     run_id = f"{run_stamp()}_{data['name']}"
     stats = stats_mod.StatsWriter(a.stats_dir or "stats", run_id)
-    stats.event("meta", run_id=run_id, pqloop=__version__, config=cfg,
+    stats.event("meta", schema=stats_mod.SCHEMA, pqloop=__version__, config=cfg,
+                **stats_mod.host_meta(),
                 source=asdict(src), mezzanine=asdict(mezz),
                 encode_ffmpeg=ff_enc.version(), vmaf_ffmpeg=ff_meas.version(),
                 gop=runner.gop_len,
@@ -408,6 +461,7 @@ def cmd_encode(a) -> int:
         "seg_duration": a.seg_duration,
         "ffmpeg": a.ffmpeg,
         "target_bitrate_kbps": parse_bitrate_kbps(a.target_bitrate) if a.target_bitrate else None,
+        "program": a.program,
     })
     space = get_space(cfg["encoder"])
 
@@ -431,14 +485,15 @@ def cmd_encode(a) -> int:
 
     out_dir = Path(a.output_dir)
     if media.is_live_url(input_url):
-        if not a.record_duration:
-            raise ValueError("live input: pass --record-duration SECONDS to bound the recording")
-        captured = media.capture_live(ff, input_url, float(a.record_duration),
+        if not a.capture_duration:
+            raise ValueError("live input: pass --capture-duration SECONDS to bound the recording")
+        captured = media.capture_live(ff, input_url, float(a.capture_duration),
                                       out_dir / "_capture.ts",
-                                      cfg.get("extra_input_args") or [], log)
+                                      cfg.get("extra_input_args") or [],
+                                      program=cfg.get("program"), log=log)
         src = media.probe_file(ff, captured)
     else:
-        src = media.probe_file(ff, input_url)
+        src = media.probe_file(ff, input_url, program=cfg.get("program"))
 
     log(f"encoding with params: {json.dumps(params, sort_keys=True)}")
     result = final_encode(ff, space, params, cfg, src, out_dir,
@@ -487,10 +542,15 @@ def cmd_probe(a) -> int:
     ff = FF(a.ffmpeg or "ffmpeg")
     if media.is_live_url(a.input):
         log(f"probing live stream {a.input} ...")
-    src = media.probe_file(ff, a.input)
+    data = ff.probe(a.input)
+    src = media.parse_probe(data, a.input, program=a.program)
     interlaced = src.interlaced
     fps_out, _ = media.output_fps(src.fps, src.fps_str, interlaced, "field")
     print(f"input:       {src.path}")
+    programs = [p.get("program_id") for p in data.get("programs") or []]
+    if programs:
+        print(f"programs:    {', '.join(str(p) for p in programs)}"
+              "   (select one with --program)")
     print(f"video:       {src.video_codec} {src.width}x{src.height} "
           f"{src.pix_fmt} {src.fps:g}fps field_order={src.field_order}")
     print(f"duration:    {src.duration:.1f}s   audio: {'yes' if src.has_audio else 'no'}")
@@ -523,7 +583,13 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--clip-start", help="clip start in source (seconds or HH:MM:SS)")
     o.add_argument("--clip-duration", type=float, help="loop clip length in seconds (default 30)")
     o.add_argument("--capture-duration", type=float,
-                   help="live input: seconds to record (default clip start+length+2)")
+                   help="live input: seconds to record "
+                        "(default clip start + clip duration + 2)")
+    o.add_argument("--program", type=int,
+                   help="MPTS input: transport stream program to capture/probe")
+    o.add_argument("--reuse-capture", action=Bool, default=None,
+                   help="live input: reuse an existing capture (same url/program) "
+                        "instead of recapturing, so runs can resume")
     o.add_argument("--seg-duration", type=float, help="segment/GOP duration in seconds (default 4)")
     o.add_argument("--scale", help="encode at WxH (VMAF still compares at source resolution)")
     o.add_argument("--pix-fmt", help="encode pixel format (default yuv420p)")
@@ -549,7 +615,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="pin a parameter (repeatable); excluded from tuning")
     o.add_argument("--unfreeze", action="append", metavar="NAME")
     o.add_argument("--two-pass", action=Bool, default=None,
-                   help="two-pass rate control (libx264)")
+                   help="two-pass rate control (libx264/libx265)")
     o.add_argument("--vmaf-model", help="libvmaf model spec, e.g. version=vmaf_v0.6.1")
     o.add_argument("--vmaf-subsample", type=int, help="score every Nth frame (default 1)")
     o.add_argument("--vmaf-threads", type=int)
@@ -557,7 +623,8 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--ffprobe")
     o.add_argument("--vmaf-ffmpeg", help="measurement ffmpeg with libvmaf "
                                          "(auto-detected if omitted)")
-    o.add_argument("--workdir", help="working directory (default work/<preset>)")
+    o.add_argument("--work-dir", "--workdir", dest="workdir",
+                   help="working directory (default work/<preset>)")
     o.add_argument("--stats-dir", help="statistics directory (default stats/)")
     o.add_argument("--keep-trials", action=Bool, default=None,
                    help="keep every trial encode + per-frame vmaf log")
@@ -567,6 +634,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="tolerated overshoot fraction before penalty (default 0.05)")
     o.add_argument("--overshoot-penalty", type=float,
                    help="objective points per %% beyond tolerance (default 1.0)")
+    o.add_argument("--undershoot-penalty", type=float,
+                   help="objective points per %% under target beyond tolerance "
+                        "(default 0 = undershoot not penalized)")
     o.add_argument("--extra-video-args", help="extra ffmpeg output args for every encode")
     o.add_argument("--extra-input-args", help="extra ffmpeg input args (live tuning etc.)")
     o.add_argument("--dry-run", action="store_true",
@@ -578,15 +648,24 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--presets-dir", default="presets")
     e.add_argument("-i", "--input", help="input file or live url (default: preset's last input)")
     e.add_argument("-o", "--output-dir", required=True)
-    e.add_argument("--format", choices=("hls", "dash", "mp4"), default="hls")
+    e.add_argument("--format", choices=("hls", "dash", "cmaf", "fmp4", "mp4"),
+                   default="hls",
+                   help="cmaf = one fMP4 segment set with both DASH and HLS "
+                        "manifests; fmp4 = single fragmented mp4 file; "
+                        "mp4 = single progressive (faststart) mp4 file")
     e.add_argument("--hls-segment-type", choices=("fmp4", "mpegts"), default="fmp4")
     e.add_argument("--seg-duration", type=float)
     e.add_argument("--target-bitrate", help="override preset bitrate")
-    e.add_argument("--audio-bitrate", default="128", help="audio kbps (default 128)")
+    e.add_argument("--audio-bitrate", default="128k",
+                   help="audio bitrate (default 128k)")
     e.add_argument("--no-audio", action="store_true")
     e.add_argument("--start", help="start position in the input (seconds or HH:MM:SS)")
     e.add_argument("--duration", type=float, help="only encode N seconds")
-    e.add_argument("--record-duration", type=float, help="live input: seconds to record")
+    e.add_argument("--capture-duration", "--record-duration",
+                   dest="capture_duration", type=float,
+                   help="live input: seconds to record")
+    e.add_argument("--program", type=int,
+                   help="MPTS input: transport stream program to capture/probe")
     e.add_argument("--ffmpeg")
     e.set_defaults(func=cmd_encode)
 
@@ -602,6 +681,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pb = sub.add_parser("probe", help="inspect an input")
     pb.add_argument("-i", "--input", required=True)
+    pb.add_argument("--program", type=int,
+                    help="MPTS input: transport stream program to inspect")
     pb.add_argument("--ffmpeg")
     pb.set_defaults(func=cmd_probe)
 

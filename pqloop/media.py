@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from .util import parse_fps, fingerprint_file, atomic_write_json
+from .util import parse_fps, fingerprint_file, atomic_write_json, load_json, now_iso
 
 LIVE_SCHEMES = ("udp", "rtp", "srt", "rist")
 INTERLACED_ORDERS = ("tt", "bb", "tb", "bt")
@@ -43,10 +43,23 @@ class SourceInfo:
         return self.field_order in INTERLACED_ORDERS
 
 
-def probe_file(ff, path) -> SourceInfo:
-    data = ff.probe(path)
+def probe_file(ff, path, program=None) -> SourceInfo:
+    return parse_probe(ff.probe(path), path, program)
+
+
+def parse_probe(data, path, program=None) -> SourceInfo:
+    streams = data.get("streams", [])
+    if program is not None:
+        for prog in data.get("programs", []):
+            if prog.get("program_id") == program:
+                streams = prog.get("streams") or streams
+                break
+        else:
+            available = [p.get("program_id") for p in data.get("programs", [])]
+            raise RuntimeError(f"program {program} not found in {path} "
+                               f"(available: {available or 'none'})")
     video = None
-    for stream in data.get("streams", []):
+    for stream in streams:
         if stream.get("codec_type") == "video" and stream.get("width"):
             video = stream
             break
@@ -57,7 +70,7 @@ def probe_file(ff, path) -> SourceInfo:
         fps_str = video.get("r_frame_rate") or "25/1"
     duration = float(video.get("duration")
                      or data.get("format", {}).get("duration") or 0.0)
-    has_audio = any(s.get("codec_type") == "audio" for s in data.get("streams", []))
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
     return SourceInfo(
         path=str(path),
         width=int(video["width"]), height=int(video["height"]),
@@ -69,17 +82,57 @@ def probe_file(ff, path) -> SourceInfo:
     )
 
 
-def capture_live(ff, url, seconds, out_path, extra_input_args=(), log=None) -> str:
+def capture_live(ff, url, seconds, out_path, extra_input_args=(), program=None,
+                 log=None) -> str:
     """Record a live (multicast/unicast UDP, RTP, SRT, RIST) stream to a local
-    MPEG-TS file via stream copy. All trials then work from this recording."""
+    MPEG-TS file via stream copy. All trials then work from this recording.
+    `program` selects one program out of a multi-program transport stream."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if log:
         log(f"capturing {seconds:.0f}s from {url} ...")
-    ff.run(["-y", *extra_input_args, "-i", url, "-t", f"{seconds:.3f}",
-            "-map", "0", "-c", "copy", "-f", "mpegts", str(out_path)],
+    ff.run(["-y", "-fflags", "+genpts", *extra_input_args, "-i", url,
+            "-t", f"{seconds:.3f}",
+            "-map", f"0:p:{program}" if program is not None else "0",
+            "-c", "copy", "-f", "mpegts", str(out_path)],
            timeout=seconds * 4 + 120)
     return str(out_path)
+
+
+def get_or_capture_live(ff, url, seconds, out_path, extra_input_args=(),
+                        program=None, reuse=False, log=None) -> str:
+    """Capture the live url, or — when `reuse` is set — keep an existing capture
+    whose sidecar meta matches url/program/input-args and covers `seconds`.
+    Reuse is what lets a live optimization resume on identical reference frames."""
+    out_path = Path(out_path)
+    meta_path = out_path.with_suffix(out_path.suffix + ".json")
+    wanted = {"url": str(url), "program": program,
+              "extra_input_args": list(extra_input_args)}
+    if reuse and out_path.exists():
+        meta = None
+        if meta_path.exists():
+            try:
+                meta = load_json(meta_path)
+            except (json.JSONDecodeError, OSError):
+                meta = None
+        if meta is None:
+            if log:
+                log(f"reusing capture {out_path} (no capture meta; assuming it matches)")
+            return str(out_path)
+        stale = [k for k, v in wanted.items() if meta.get(k) != v]
+        if float(meta.get("seconds") or 0.0) < float(seconds):
+            stale.append("seconds")
+        if not stale:
+            if log:
+                log(f"reusing capture {out_path} ({meta.get('seconds'):g}s of {url})")
+            return str(out_path)
+        if log:
+            log(f"recapturing ({', '.join(stale)} changed since last capture)")
+    captured = capture_live(ff, url, seconds, out_path, extra_input_args,
+                            program, log)
+    atomic_write_json(meta_path, {**wanted, "seconds": float(seconds),
+                                  "captured_at": now_iso()})
+    return captured
 
 
 def deinterlace_decision(source: SourceInfo, mode) -> bool:
@@ -125,10 +178,11 @@ class MezzInfo:
 
 def _mezz_inputs_key(source: SourceInfo, start, duration, deinterlaced,
                      deint_mode) -> str:
+    # Content-based (not mtime-based): a recaptured-but-identical live clip or a
+    # file copied between servers keeps its key, so the mezzanine is reused.
     src = Path(source.path)
-    stat = src.stat()
     ident = {
-        "src": str(src), "size": stat.st_size, "mtime": int(stat.st_mtime),
+        "src": str(src), "src_fp": fingerprint_file(src),
         "start": round(float(start), 3), "duration": round(float(duration), 3),
         "deint": bool(deinterlaced), "deint_mode": deint_mode if deinterlaced else "",
     }
@@ -160,12 +214,16 @@ def get_or_build_mezzanine(ff, source: SourceInfo, start, duration,
         what = f"bwdif {deint_mode} -> {fps:g}fps, " if deinterlaced else ""
         log(f"building lossless mezzanine ({what}{duration:g}s @ {start:g}s) ...")
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # bitexact muxing: no random SegmentUID/date, so rebuilding from unchanged
+    # inputs reproduces the same bytes and the fingerprint (and with it the
+    # optimizer's trial cache) survives a rebuild.
     ff.run(["-y", "-ss", f"{float(start):.3f}", "-t", f"{float(duration):.3f}",
             "-i", source.path,
             "-vf", ",".join(filters),
             "-an", "-sn", "-dn",
             "-c:v", "libx264", "-qp", "0", "-preset", "ultrafast",
-            "-r", fps_str, "-f", "matroska", str(out_path)],
+            "-r", fps_str, "-fflags", "+bitexact", "-f", "matroska",
+            str(out_path)],
            timeout=max(600.0, duration * 30 + 300))
 
     probed = probe_file(ff, out_path)

@@ -4,9 +4,22 @@ from __future__ import annotations
 
 import csv
 import json
+import platform
+import socket
 from pathlib import Path
 
 from .util import now_iso
+
+SCHEMA = 2   # bump when the event record shape changes
+
+
+def host_meta() -> dict:
+    """Identify the machine a run came from (multi-server comparability)."""
+    return {
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+    }
 
 
 class StatsWriter:
@@ -18,7 +31,7 @@ class StatsWriter:
         self._fh = open(self.path, "w")
 
     def event(self, kind, **payload):
-        record = {"ts": now_iso(), "kind": kind}
+        record = {"ts": now_iso(), "kind": kind, "run_id": self.run_id}
         record.update(payload)
         self._fh.write(json.dumps(record, sort_keys=False, default=str) + "\n")
         self._fh.flush()

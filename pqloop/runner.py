@@ -24,6 +24,7 @@ class RunConfig:
     bufsize_ratio: float = 2.0
     bitrate_tolerance: float = 0.05     # fraction over target tolerated
     overshoot_penalty: float = 1.0      # objective points per % beyond tolerance
+    undershoot_penalty: float = 0.0     # objective points per % under target beyond tolerance
     seg_duration: float = 4.0
     pix_fmt: str = "yuv420p"
     scale: str = ""                     # "WxH" or empty
@@ -60,10 +61,10 @@ class TrialRunner:
             bufsize_kbps=int(round(cfg.target_bitrate_kbps * cfg.bufsize_ratio)),
         )
         self.gop_len = max(1, int(round(cfg.seg_duration * mezz.fps)))
-        self._two_pass = cfg.two_pass and space.name == "libx264"
+        self._two_pass = space.two_pass if cfg.two_pass else None
         if cfg.two_pass and not self._two_pass:
-            self.log(f"note: --two-pass currently supported for libx264 only; "
-                     f"using single pass with {space.name}")
+            self.log(f"note: --two-pass not supported for {space.name}; "
+                     f"using single pass")
 
     # ---- command construction ------------------------------------------------
 
@@ -72,11 +73,14 @@ class TrialRunner:
         if self.cfg.scale:
             w, h = self.cfg.scale.lower().split("x", 1)
             args += ["-vf", f"scale={int(w)}:{int(h)}:flags=lanczos"]
+        extra_kv = None
+        if pass_num and self._two_pass == "kv":
+            extra_kv = {"pass": pass_num, "stats": str(passlog)}
         args += self.space.video_args(params, gop_len=self.gop_len,
                                       seg_duration=self.cfg.seg_duration,
-                                      rc=self.rc)
+                                      rc=self.rc, extra_kv=extra_kv)
         args += ["-pix_fmt", self.cfg.pix_fmt]
-        if pass_num:
+        if pass_num and self._two_pass == "flags":
             args += ["-pass", str(pass_num), "-passlogfile", str(passlog)]
         args += list(self.cfg.extra_video_args)
         args += ["-an", "-sn", "-dn"]
@@ -125,8 +129,10 @@ class TrialRunner:
             raw = scores[self.cfg.metric_key]
             target = float(self.cfg.target_bitrate_kbps)
             over_pct = max(0.0, (bitrate_kbps / target - 1.0) * 100.0) if target else 0.0
+            under_pct = max(0.0, (1.0 - bitrate_kbps / target) * 100.0) if target else 0.0
             tolerance_pct = self.cfg.bitrate_tolerance * 100.0
-            penalty = self.cfg.overshoot_penalty * max(0.0, over_pct - tolerance_pct)
+            penalty = (self.cfg.overshoot_penalty * max(0.0, over_pct - tolerance_pct)
+                       + self.cfg.undershoot_penalty * max(0.0, under_pct - tolerance_pct))
             objective = raw - penalty
 
             frames = scores.get("vmaf_frames") or int(self.mezz.duration * self.mezz.fps)
@@ -138,6 +144,7 @@ class TrialRunner:
                 "encode_fps": round((self.mezz.duration * self.mezz.fps) / encode_time, 1)
                               if encode_time > 0 else 0.0,
                 "over_target_pct": round(over_pct, 2),
+                "under_target_pct": round(under_pct, 2),
                 "penalty": round(penalty, 3),
                 "objective": round(objective, 4),
             })

@@ -57,10 +57,25 @@ class PresetTest(unittest.TestCase):
 
 
 class StatsTest(unittest.TestCase):
+    def test_run_id_and_schema_on_events(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = stats.StatsWriter(td, "run7")
+            w.event("meta", schema=stats.SCHEMA, **stats.host_meta())
+            w.event("trial", n=1, ok=True)
+            w.close()
+            events = stats.read_events(w.path)
+            self.assertTrue(all(e["run_id"] == "run7" for e in events))
+            meta = events[0]
+            self.assertEqual(meta["schema"], stats.SCHEMA)
+            self.assertTrue(meta["hostname"])
+            self.assertTrue(meta["platform"])
+            csv_header = Path(stats.to_csv(w.path)).read_text().splitlines()[0]
+            self.assertIn("run_id", csv_header)
+
     def test_jsonl_and_csv(self):
         with tempfile.TemporaryDirectory() as td:
             w = stats.StatsWriter(td, "run1")
-            w.event("meta", run_id="run1", config={"encoder": "libx264"})
+            w.event("meta", config={"encoder": "libx264"})
             w.event("trial", n=1, phase="baseline", label="baseline", cached=False,
                     ok=True, objective=90.0,
                     params={"preset": "medium", "aq-mode": 1},

@@ -49,7 +49,8 @@ class FF:
 
     def probe(self, url, input_args=(), timeout=90) -> dict:
         cmd = [self.ffprobe, "-v", "error", *[str(a) for a in input_args],
-               "-print_format", "json", "-show_format", "-show_streams", str(url)]
+               "-print_format", "json", "-show_format", "-show_streams",
+               "-show_programs", str(url)]
         try:
             cp = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, timeout=timeout)
