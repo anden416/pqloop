@@ -1,0 +1,1 @@
+time ffmpeg -y -hide_banner -benchmark -ss 01:05:08 -t 00:01:00 -i input/France_vs_Croatia_WCFinal2018.ts -map 0 -vf "bwdif=mode=send_field:parity=tff:deint=all" -c:v libx264 -preset slow -crf 16 -threads 0 -c:a copy output/france_croatia_90min_1min_bwdif_slow_crf16.mkv

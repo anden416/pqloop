@@ -1,0 +1,8 @@
+input/
+output/
+work/
+tools/
+stats/
+__pycache__/
+*.egg-info/
+*.pyc

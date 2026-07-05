@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pqloop"
+version = "0.1.0"
+description = "VMAF-feedback picture quality optimization loop for ffmpeg"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[project.scripts]
+pqloop = "pqloop.cli:main"
+
+[tool.setuptools]
+packages = ["pqloop"]
