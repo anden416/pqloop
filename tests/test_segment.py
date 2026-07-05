@@ -83,6 +83,56 @@ class Mp4Test(unittest.TestCase):
             _encode("libx264", "webm")
 
 
+class StreamMapTest(unittest.TestCase):
+    def _encode_source(self, source):
+        ff = FakeFF()
+        space = get_space("libx264")
+        with tempfile.TemporaryDirectory() as td:
+            segment.final_encode(ff, space, space.defaults(),
+                                 {"target_bitrate_kbps": 3000}, source, td)
+        return ff.calls[0][0]
+
+    def test_default_source_keeps_first_stream_maps(self):
+        src = _source()
+        src.has_audio = True
+        args = self._encode_source(src)
+        maps = [args[i + 1] for i, a in enumerate(args) if a == "-map"]
+        self.assertEqual(maps, ["0:v:0", "0:a:0?"])
+
+    def test_program_selected_streams_are_mapped(self):
+        src = _source()
+        src.has_audio = True
+        src.program, src.video_index, src.audio_index = 2, 4, 5
+        args = self._encode_source(src)
+        maps = [args[i + 1] for i, a in enumerate(args) if a == "-map"]
+        self.assertEqual(maps, ["0:4", "0:5"])
+
+
+class GopDurationTest(unittest.TestCase):
+    def _encode(self, cfg):
+        ff = FakeFF()
+        space = get_space("libx264")
+        with tempfile.TemporaryDirectory() as td:
+            segment.final_encode(ff, space, space.defaults(), cfg, _source(),
+                                 td, fmt="mp4")
+        return ff.calls[0][0]
+
+    def test_gop_defaults_to_segment(self):
+        # 4s segment at 25fps -> 100-frame GOP, keyframes forced every 4s
+        args = self._encode({"target_bitrate_kbps": 3000, "seg_duration": 4.0})
+        self.assertEqual(args[args.index("-g") + 1], "100")
+        self.assertEqual(args[args.index("-force_key_frames") + 1],
+                         "expr:gte(t,n_forced*4)")
+
+    def test_gop_duration_decouples_from_segment(self):
+        # 2s GOP inside 4s segments: -g halves, segment cadence unchanged
+        args = self._encode({"target_bitrate_kbps": 3000, "seg_duration": 4.0,
+                             "gop_duration": 2.0})
+        self.assertEqual(args[args.index("-g") + 1], "50")
+        self.assertEqual(args[args.index("-force_key_frames") + 1],
+                         "expr:gte(t,n_forced*4)")
+
+
 class TimeoutTest(unittest.TestCase):
     def test_run_timeout_is_bounded(self):
         _, timeout = _encode("libx264", "mp4")

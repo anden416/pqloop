@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest import mock
 
 from pqloop.encoders import get_space
+from pqloop.ffmpeg import FFmpegError
 from pqloop.media import MezzInfo
 from pqloop.runner import RunConfig, TrialRunner
 
@@ -125,6 +126,74 @@ class TwoPassTest(unittest.TestCase):
                 out = runner.evaluate(get_space("libsvtav1").defaults(), "t")
             self.assertTrue(out.ok)
             self.assertEqual(len(ff.calls), 1)
+
+    def test_failed_second_pass_cleans_up_passlog(self):
+        class SecondPassFails(FakeFF):
+            def run(self, args, timeout=None):
+                args = [str(a) for a in args]
+                if "-pass" in args and args[args.index("-pass") + 1] == "1":
+                    log = args[args.index("-passlogfile") + 1]
+                    Path(log + "-0.log").write_bytes(b"stats")
+                    return
+                raise FFmpegError("encoder exploded")
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = RunConfig(encoder="libx264", target_bitrate_kbps=4000,
+                            two_pass=True)
+            ff = SecondPassFails(4000)
+            runner = TrialRunner(cfg, ff, ff, get_space("libx264"), _mezz(td), td)
+            out = runner.evaluate(get_space("libx264").defaults(), "t")
+            self.assertFalse(out.ok)
+            self.assertEqual(list(runner.trials_dir.glob("*.passlog*")), [])
+
+
+class GopLenTest(unittest.TestCase):
+    def _runner(self, td, **over):
+        cfg = RunConfig(target_bitrate_kbps=5000, **over)
+        return TrialRunner(cfg, FakeFF(5000), FakeFF(5000),
+                           get_space("libx264"), _mezz(td), td)
+
+    def test_gop_defaults_to_segment(self):
+        with tempfile.TemporaryDirectory() as td:
+            runner = self._runner(td, seg_duration=4.0)   # 4s * 50fps
+            self.assertEqual(runner.gop_len, 200)
+
+    def test_gop_duration_decouples_from_segment(self):
+        with tempfile.TemporaryDirectory() as td:
+            runner = self._runner(td, seg_duration=4.0, gop_duration=2.0)
+            self.assertEqual(runner.gop_len, 100)         # 2s * 50fps
+            args = runner.encode_args(get_space("libx264").defaults(),
+                                      Path(td) / "o.mp4")
+            self.assertEqual(args[args.index("-g") + 1], "100")
+            # keyframes are still forced at the 4s segment boundary
+            self.assertEqual(args[args.index("-force_key_frames") + 1],
+                             "expr:gte(t,n_forced*4)")
+
+
+class KeepTrialsCounterTest(unittest.TestCase):
+    def test_counter_resumes_after_existing_artifacts(self):
+        with tempfile.TemporaryDirectory() as td:
+            trials = Path(td) / "trials"
+            trials.mkdir()
+            (trials / "t0003.mp4").write_bytes(b"x")
+            (trials / "t0002.vmaf.json").write_bytes(b"{}")
+            cfg = RunConfig(target_bitrate_kbps=5000, keep_trials=True)
+            runner = TrialRunner(cfg, FakeFF(5000), FakeFF(5000),
+                                 get_space("libx264"), _mezz(td), td)
+            self.assertEqual(runner.counter, 3)
+            with mock.patch("pqloop.runner.vmaf.measure",
+                            return_value=dict(SCORES)):
+                out = runner.evaluate(get_space("libx264").defaults(), "t")
+            self.assertTrue(out.ok)
+            self.assertTrue((trials / "t0003.mp4").exists())   # not overwritten
+            self.assertTrue((trials / "t0004.mp4").exists())
+
+    def test_counter_starts_at_zero_without_kept_trials(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = RunConfig(target_bitrate_kbps=5000)
+            runner = TrialRunner(cfg, FakeFF(5000), FakeFF(5000),
+                                 get_space("libx264"), _mezz(td), td)
+            self.assertEqual(runner.counter, 0)
 
 
 if __name__ == "__main__":

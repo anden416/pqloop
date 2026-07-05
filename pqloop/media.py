@@ -37,10 +37,25 @@ class SourceInfo:
     has_audio: bool
     video_codec: str
     pix_fmt: str
+    program: int = None        # MPTS program the streams below were picked from
+    video_index: int = None    # absolute input stream index of the probed video
+    audio_index: int = None    # absolute input stream index of the probed audio
 
     @property
     def interlaced(self) -> bool:
         return self.field_order in INTERLACED_ORDERS
+
+    def video_map(self) -> list:
+        """ffmpeg -map arguments selecting the probed video stream, so encodes
+        use the same stream the probe (and any --program selection) reported."""
+        if self.video_index is None:
+            return ["-map", "0:v:0"]
+        return ["-map", f"0:{self.video_index}"]
+
+    def audio_map(self) -> list:
+        if self.audio_index is None:
+            return ["-map", "0:a:0?"]
+        return ["-map", f"0:{self.audio_index}"]
 
 
 def probe_file(ff, path, program=None) -> SourceInfo:
@@ -70,15 +85,19 @@ def parse_probe(data, path, program=None) -> SourceInfo:
         fps_str = video.get("r_frame_rate") or "25/1"
     duration = float(video.get("duration")
                      or data.get("format", {}).get("duration") or 0.0)
-    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     return SourceInfo(
         path=str(path),
         width=int(video["width"]), height=int(video["height"]),
         fps=parse_fps(fps_str), fps_str=fps_str,
         field_order=video.get("field_order", "progressive") or "progressive",
-        duration=duration, has_audio=has_audio,
+        duration=duration, has_audio=audio is not None,
         video_codec=video.get("codec_name", "?"),
         pix_fmt=video.get("pix_fmt", "?"),
+        program=program,
+        video_index=None if video.get("index") is None else int(video["index"]),
+        audio_index=None if audio is None or audio.get("index") is None
+                    else int(audio["index"]),
     )
 
 
@@ -186,6 +205,11 @@ def _mezz_inputs_key(source: SourceInfo, start, duration, deinterlaced,
         "start": round(float(start), 3), "duration": round(float(duration), 3),
         "deint": bool(deinterlaced), "deint_mode": deint_mode if deinterlaced else "",
     }
+    # The content fingerprint covers the whole file, so two programs of one
+    # MPTS share it — the selected program must be part of the identity. Only
+    # added when set, so pre-existing single-program mezzanines keep their key.
+    if source.program is not None:
+        ident["program"] = int(source.program)
     return json.dumps(ident, sort_keys=True)
 
 
@@ -219,6 +243,7 @@ def get_or_build_mezzanine(ff, source: SourceInfo, start, duration,
     # optimizer's trial cache) survives a rebuild.
     ff.run(["-y", "-ss", f"{float(start):.3f}", "-t", f"{float(duration):.3f}",
             "-i", source.path,
+            *source.video_map(),
             "-vf", ",".join(filters),
             "-an", "-sn", "-dn",
             "-c:v", "libx264", "-qp", "0", "-preset", "ultrafast",

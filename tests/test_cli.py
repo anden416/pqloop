@@ -1,4 +1,9 @@
+import contextlib
+import io
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from pqloop import cli
 from pqloop.encoders import get_space
@@ -15,6 +20,41 @@ class MergeConfigTest(unittest.TestCase):
     def test_none_cli_value_means_not_given(self):
         cfg = cli.merge_config({"two_pass": True}, {"two_pass": None})
         self.assertTrue(cfg["two_pass"])
+
+    def test_merged_collections_do_not_alias_defaults_or_preset(self):
+        preset = {"extra_video_args": ["-flags", "+cgop"]}
+        cfg = cli.merge_config(preset, {})
+        cfg["extra_video_args"].append("-foo")
+        cfg["frozen"]["preset"] = "slow"
+        cfg["exclude_params"].append("me")
+        self.assertEqual(preset["extra_video_args"], ["-flags", "+cgop"])
+        self.assertEqual(cli.CONFIG_DEFAULTS["frozen"], {})
+        self.assertEqual(cli.CONFIG_DEFAULTS["exclude_params"], [])
+
+
+class ValidateConfigTest(unittest.TestCase):
+    def _cfg(self, **over):
+        cfg = cli.merge_config({}, {"target_bitrate_kbps": 6000})
+        cfg.update(over)
+        return cfg
+
+    def test_valid_configs_pass(self):
+        cli.validate_config(self._cfg())
+        cli.validate_config(self._cfg(scale="1280x720"))
+        # GOP that divides the segment evenly (incl. GOP == segment)
+        cli.validate_config(self._cfg(seg_duration=4.0, gop_duration=2.0))
+        cli.validate_config(self._cfg(seg_duration=4.0, gop_duration=4.0))
+
+    def test_bad_values_raise_before_any_media_work(self):
+        for over in ({"scale": "1280:720"}, {"scale": "0x720"},
+                     {"clip_duration": 0}, {"seg_duration": -1},
+                     {"maxrate_ratio": 0}, {"vmaf_subsample": 0},
+                     {"metric": "median"}, {"clip_start": -5},
+                     {"gop_duration": 0},                            # non-positive
+                     {"seg_duration": 4.0, "gop_duration": 3.0},     # 4 not a multiple of 3
+                     {"seg_duration": 4.0, "gop_duration": 8.0}):    # GOP longer than segment
+            with self.assertRaises(ValueError, msg=over):
+                cli.validate_config(self._cfg(**over))
 
 
 class ParseFreezesTest(unittest.TestCase):
@@ -42,10 +82,19 @@ class ObjectiveKeyTest(unittest.TestCase):
                          ("two_pass", True),
                          ("extra_video_args", ["-flags", "+cgop"]),
                          ("undershoot_penalty", 0.5),
+                         ("gop_duration", 2.0),
                          ("scale", "1280x720")):
             cfg = self._base()
             cfg[key] = val
             self.assertNotEqual(base, cli.objective_key(cfg), key)
+
+    def test_unset_gop_duration_matches_legacy_key(self):
+        # a preset predating gop_duration (key absent) must hash the same as one
+        # carrying gop_duration=None, so upgrading doesn't reset its cache
+        legacy = self._base()
+        legacy.pop("gop_duration", None)
+        self.assertEqual(cli.objective_key(legacy),
+                         cli.objective_key(self._base()))
 
     def test_non_objective_settings_do_not(self):
         base = cli.objective_key(self._base())
@@ -120,6 +169,14 @@ class ParserAliasTest(unittest.TestCase):
         self.assertEqual(opt.capture_duration, 30.0)
         self.assertEqual(enc.capture_duration, 30.0)
 
+    def test_gop_duration_on_optimize_and_encode(self):
+        opt = self.parser.parse_args(
+            ["optimize", "-p", "x", "--gop-duration", "2"])
+        enc = self.parser.parse_args(
+            ["encode", "-p", "x", "-o", "out", "--gop-duration", "2"])
+        self.assertEqual(opt.gop_duration, 2.0)
+        self.assertEqual(enc.gop_duration, 2.0)
+
     def test_record_duration_is_an_alias(self):
         enc = self.parser.parse_args(
             ["encode", "-p", "x", "-o", "out", "--record-duration", "30"])
@@ -129,6 +186,88 @@ class ParserAliasTest(unittest.TestCase):
         for flag in ("--work-dir", "--workdir"):
             opt = self.parser.parse_args(["optimize", "-p", "x", flag, "w"])
             self.assertEqual(opt.workdir, "w", flag)
+
+    def test_ffprobe_shared_across_commands(self):
+        for argv in (["optimize", "-p", "x", "--ffprobe", "fp"],
+                     ["encode", "-p", "x", "-o", "out", "--ffprobe", "fp"],
+                     ["probe", "-i", "in.ts", "--ffprobe", "fp"]):
+            ns = self.parser.parse_args(argv)
+            self.assertEqual(ns.ffprobe, "fp", argv[0])
+
+    def test_extra_input_args_on_optimize_and_encode(self):
+        for argv in (["optimize", "-p", "x", "--extra-input-args=-nostats"],
+                     ["encode", "-p", "x", "-o", "out",
+                      "--extra-input-args=-nostats"]):
+            ns = self.parser.parse_args(argv)
+            self.assertEqual(ns.extra_input_args, "-nostats", argv[0])
+
+
+class _DryRunFF:
+    """Probe-only fake: anything beyond probing fails the test."""
+
+    def __init__(self):
+        self.probed = []
+
+    def probe(self, url):
+        self.probed.append(str(url))
+        return {"streams": [{"index": 0, "codec_type": "video", "width": 1920,
+                             "height": 1080, "avg_frame_rate": "25/1",
+                             "field_order": "progressive"}],
+                "format": {"duration": "60"}}
+
+    def __getattr__(self, name):
+        raise AssertionError(f"--dry-run must not call FF.{name}")
+
+
+class DryRunTest(unittest.TestCase):
+    def _run(self, td, input_url):
+        argv = ["optimize", "-i", input_url, "-p", "dry", "--presets-dir", td,
+                "-b", "6000k", "--work-dir", str(Path(td) / "w"), "--dry-run"]
+        ff = _DryRunFF()
+        out = io.StringIO()
+        with mock.patch.object(cli, "FF", lambda *a, **k: ff), \
+             mock.patch.object(cli, "resolve_measure_ff",
+                               side_effect=AssertionError("resolved vmaf ffmpeg")), \
+             mock.patch.object(cli.media, "capture_live",
+                               side_effect=AssertionError("captured live input")), \
+             mock.patch.object(cli.media, "get_or_capture_live",
+                               side_effect=AssertionError("captured live input")), \
+             mock.patch.object(cli.media, "get_or_build_mezzanine",
+                               side_effect=AssertionError("built mezzanine")), \
+             contextlib.redirect_stdout(out):
+            rc = cli.main(argv)
+        return rc, ff, out.getvalue(), td
+
+    def test_file_input_only_probes_and_prints_command(self):
+        with tempfile.TemporaryDirectory() as td:
+            inp = Path(td) / "in.ts"
+            inp.write_bytes(b"ts")
+            rc, ff, output, _ = self._run(td, str(inp))
+            self.assertEqual(rc, 0)
+            self.assertEqual(ff.probed, [str(inp)])
+            self.assertIn("baseline encode command:", output)
+            self.assertIn("libx264", output)
+            # nothing written: no workdir artifacts, no preset saved
+            self.assertFalse((Path(td) / "w").exists())
+            self.assertFalse((Path(td) / "dry.json").exists())
+
+    def test_live_input_is_probed_not_captured(self):
+        with tempfile.TemporaryDirectory() as td:
+            url = "udp://@239.0.0.1:1234"
+            rc, ff, output, _ = self._run(td, url)
+            self.assertEqual(rc, 0)
+            self.assertEqual(ff.probed, [url])
+            self.assertIn("baseline encode command:", output)
+
+
+class PresetsShowTest(unittest.TestCase):
+    def test_show_missing_preset_errors_instead_of_fabricating(self):
+        with tempfile.TemporaryDirectory() as td:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = cli.main(["presets", "--presets-dir", td, "--show", "nope"])
+            self.assertEqual(rc, 2)
+            self.assertIn("preset not found", err.getvalue())
 
 
 if __name__ == "__main__":

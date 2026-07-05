@@ -12,7 +12,7 @@ settings into concrete ffmpeg arguments, merging private options into a single
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -281,9 +281,10 @@ def _quadra_space(codec) -> EncoderSpace:
     """EXPERIMENTAL: NETINT Quadra via the netint_ffmpeg fork's -xcoder-params
     (colon-joined key=value; libxcoder matches names case-insensitively).
     Checked against the netint_ffmpeg + libxcoder v5.7 sources and the Quadra
-    Integration & Programming Guide v5.7 (docs/netint_quadra_integration_guide.md,
-    sections 8.4/12.4) but not yet validated on Quadra hardware — check
-    emitted commands with --dry-run before spending encode time.
+    Integration & Programming Guide v5.7 (summarized with section references
+    in docs/quadra_parameter_notes.md) but not yet validated on Quadra
+    hardware — check emitted commands with --dry-run before spending encode
+    time.
 
     The rate-control mode is itself searched, via the rcMode pseudo-parameter
     (emit="none": cached/screened/refined like any knob, but consumed by

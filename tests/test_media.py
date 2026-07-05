@@ -72,6 +72,24 @@ class MezzKeyTest(unittest.TestCase):
             self.assertNotEqual(media._mezz_inputs_key(src, 0, 30, True, "field"), base)
             self.assertNotEqual(media._mezz_inputs_key(src, 0, 20, False, "field"), base)
 
+    def test_key_tracks_program_selection(self):
+        # two programs of one MPTS share the file fingerprint, so the program
+        # must change the key; program=None keeps the pre-existing key shape
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "mpts.ts"
+            f.write_bytes(b"content")
+            base = media._mezz_inputs_key(_source(f), 0, 20, True, "field")
+            src_p1 = _source(f)
+            src_p1.program = 1
+            src_p2 = _source(f)
+            src_p2.program = 2
+            key_p1 = media._mezz_inputs_key(src_p1, 0, 20, True, "field")
+            key_p2 = media._mezz_inputs_key(src_p2, 0, 20, True, "field")
+            self.assertNotEqual(key_p1, base)
+            self.assertNotEqual(key_p2, base)
+            self.assertNotEqual(key_p1, key_p2)
+            self.assertNotIn("program", base)
+
 
 class FakeCaptureFF:
     def __init__(self):
@@ -137,13 +155,13 @@ class FakeProbeFF:
 
 class ProbeProgramTest(unittest.TestCase):
     def _data(self):
-        vid1 = {"codec_type": "video", "width": 1280, "height": 720,
+        vid1 = {"index": 0, "codec_type": "video", "width": 1280, "height": 720,
                 "avg_frame_rate": "25/1", "codec_name": "h264",
                 "pix_fmt": "yuv420p", "field_order": "progressive"}
-        vid2 = {"codec_type": "video", "width": 1920, "height": 1080,
+        vid2 = {"index": 2, "codec_type": "video", "width": 1920, "height": 1080,
                 "avg_frame_rate": "50/1", "codec_name": "h264",
                 "pix_fmt": "yuv420p", "field_order": "progressive"}
-        aud = {"codec_type": "audio"}
+        aud = {"index": 3, "codec_type": "audio"}
         return {
             "programs": [
                 {"program_id": 1, "streams": [vid1]},
@@ -157,14 +175,57 @@ class ProbeProgramTest(unittest.TestCase):
         src = media.probe_file(FakeProbeFF(self._data()), "mpts.ts", program=2)
         self.assertEqual((src.width, src.height), (1920, 1080))
         self.assertTrue(src.has_audio)
+        self.assertEqual(src.program, 2)
+        self.assertEqual(src.video_index, 2)
+        self.assertEqual(src.audio_index, 3)
+        self.assertEqual(src.video_map(), ["-map", "0:2"])
+        self.assertEqual(src.audio_map(), ["-map", "0:3"])
 
     def test_default_is_first_video_stream(self):
         src = media.probe_file(FakeProbeFF(self._data()), "mpts.ts")
         self.assertEqual((src.width, src.height), (1280, 720))
+        self.assertIsNone(src.program)
+        self.assertEqual(src.video_index, 0)
+
+    def test_map_falls_back_when_indexes_unknown(self):
+        src = _source("x.ts")
+        self.assertEqual(src.video_map(), ["-map", "0:v:0"])
+        self.assertEqual(src.audio_map(), ["-map", "0:a:0?"])
 
     def test_missing_program_raises(self):
         with self.assertRaises(RuntimeError):
             media.probe_file(FakeProbeFF(self._data()), "mpts.ts", program=7)
+
+
+class FakeMezzFF:
+    """run() writes the mezzanine file; probe() describes the result."""
+
+    def __init__(self):
+        self.calls = []
+
+    def run(self, args, timeout=None):
+        args = [str(a) for a in args]
+        self.calls.append(args)
+        Path(args[-1]).write_bytes(b"mezz")
+
+    def probe(self, path):
+        return {"streams": [{"index": 0, "codec_type": "video", "width": 1920,
+                             "height": 1080, "avg_frame_rate": "50/1"}],
+                "format": {"duration": "20.0"}}
+
+
+class MezzanineMapTest(unittest.TestCase):
+    def test_build_maps_the_selected_program_stream(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "mpts.ts"
+            f.write_bytes(b"mpts content")
+            src = _source(f)
+            src.program, src.video_index = 2, 4
+            ff = FakeMezzFF()
+            media.get_or_build_mezzanine(ff, src, 0, 20, "off", "field",
+                                         Path(td) / "mezz.mkv")
+            args = ff.calls[0]
+            self.assertEqual(args[args.index("-map") + 1], "0:4")
 
 
 if __name__ == "__main__":

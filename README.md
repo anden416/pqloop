@@ -261,10 +261,24 @@ an 8-bit reference for now. You can still *encode* 10-bit
 
 ## Encoders
 
-GOP/keyframe placement is *not* tuned — it is fixed to your segment duration
-(`--seg-duration`, default 4 s: `-g`, scene-cut off, forced IDR at segment
-boundaries) because a packager needs it that way, and trials should measure
-what production will ship.
+GOP/keyframe placement is *not* tuned — it is fixed, not searched, so trials
+measure what a packager-fed production encode ships. By default the GOP equals
+your segment (`--seg-duration`, default 4 s: `-g`, scene-cut off, forced IDR at
+segment boundaries). To run a shorter keyframe interval than the segment — say a
+2 s GOP inside 4 s segments (100 frames at 50 fps) — set `--gop-duration`:
+
+```bash
+python3 -m pqloop optimize -i input/match.ts -p sports -b 6000k \
+    --seg-duration 4 --gop-duration 2
+```
+
+`--gop-duration` must divide the segment evenly so every segment still *starts*
+on a keyframe; the extra keyframes land inside each segment while the segment
+boundaries stay IDR-aligned. The value is stored in the preset, so `encode`
+ships the same cadence (override it there with `--gop-duration` too). Note for
+`libsvtav1`: ffmpeg forces keyframes purely from `-g` there (it ignores
+`-force_key_frames`), so the divides-evenly rule is what keeps its segments
+keyframe-aligned.
 
 Curated parameter spaces and how to run them:
 
@@ -317,9 +331,11 @@ ignores `-g`/`-maxrate`/`-bufsize`: pqloop drives the keyframe cadence with
 `intraPeriod` (tracks the GOP) and emits `RcEnable`/`vbvBufferSize`/
 `vbvMaxRate` per rate-control mode, derived from the usual ratios. The
 space is checked against the netint_ffmpeg + libxcoder v5.7 sources and the
-Quadra Integration & Programming Guide v5.7, but has not been validated on
-hardware yet, so inspect the emitted command first — `--dry-run` works even
-on a machine without the encoder installed:
+Quadra Integration & Programming Guide v5.7 (the facts relied on are
+summarized in `docs/quadra_parameter_notes.md`), but has not been validated
+on hardware yet, so inspect the emitted command first — `--dry-run` works even
+on a machine without the encoder installed (it only probes the input; no
+libvmaf build, live capture, or mezzanine is needed):
 
 ```bash
 python3 -m pqloop optimize -i input/match.ts -p quadra_test \
@@ -367,8 +383,8 @@ ordering carried over as priors — whenever they'd no longer be comparable:
 - the reference clip changed (different content, clip window, or deinterlace
   settings), or
 - the objective changed (encoder, target bitrate, VBV ratios, tolerance or
-  penalties, metric, scale, pix_fmt, seg duration, two-pass, VMAF model or
-  subsampling, extra video args).
+  penalties, metric, scale, pix_fmt, seg duration, GOP duration, two-pass, VMAF
+  model or subsampling, extra video args).
 
 Presets travel between servers: the tuned parameters are plain encoder
 settings and transfer as-is. The trial cache is tied to the mezzanine
@@ -459,3 +475,9 @@ tools/             optional: static ffmpeg with libvmaf for measurement
 ```
 
 Each runtime directory can be relocated with the flag listed next to it.
+
+`input/`, `output/`, `work/`, `stats/`, and `tools/` are gitignored local
+cache/artifact directories and can grow large (captures, mezzanines, trial
+encodes). Everything in them is recreated on demand, so they are safe to
+prune when disk space matters — deleting `work/<preset>/` only costs a
+mezzanine rebuild on the next run.

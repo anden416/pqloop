@@ -4,6 +4,7 @@ penalty when the encode busts the bitrate target beyond tolerance)."""
 
 from __future__ import annotations
 
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ class RunConfig:
     overshoot_penalty: float = 1.0      # objective points per % beyond tolerance
     undershoot_penalty: float = 0.0     # objective points per % under target beyond tolerance
     seg_duration: float = 4.0
+    gop_duration: float = None           # None = lock GOP to the segment
     pix_fmt: str = "yuv420p"
     scale: str = ""                     # "WxH" or empty
     metric: str = "mean"
@@ -51,16 +53,22 @@ class TrialRunner:
         self.mezz = mezz
         self.workdir = Path(workdir)
         self.trials_dir = self.workdir / "trials"
-        self.trials_dir.mkdir(parents=True, exist_ok=True)
         self.log = log or (lambda m: None)
+        # With --keep-trials a resumed run must not overwrite t0001.* from the
+        # previous process, so continue numbering after existing artifacts.
         self.counter = 0
+        if cfg.keep_trials and self.trials_dir.is_dir():
+            found = [re.match(r"t(\d+)\.", p.name)
+                     for p in self.trials_dir.iterdir()]
+            self.counter = max((int(m.group(1)) for m in found if m), default=0)
         self.best_objective = NEG_INF
         self.rc = RateControl(
             bitrate_kbps=int(cfg.target_bitrate_kbps),
             maxrate_kbps=int(round(cfg.target_bitrate_kbps * cfg.maxrate_ratio)),
             bufsize_kbps=int(round(cfg.target_bitrate_kbps * cfg.bufsize_ratio)),
         )
-        self.gop_len = max(1, int(round(cfg.seg_duration * mezz.fps)))
+        gop_dur = cfg.gop_duration or cfg.seg_duration
+        self.gop_len = max(1, int(round(gop_dur * mezz.fps)))
         self._two_pass = space.two_pass if cfg.two_pass else None
         if cfg.two_pass and not self._two_pass:
             self.log(f"note: --two-pass not supported for {space.name}; "
@@ -93,6 +101,7 @@ class TrialRunner:
     # ---- evaluation ------------------------------------------------------------
 
     def evaluate(self, params, label) -> TrialOutcome:
+        self.trials_dir.mkdir(parents=True, exist_ok=True)
         self.counter += 1
         n = self.counter
         out_path = self.trials_dir / f"t{n:04d}.mp4"
@@ -135,7 +144,6 @@ class TrialRunner:
                        + self.cfg.undershoot_penalty * max(0.0, under_pct - tolerance_pct))
             objective = raw - penalty
 
-            frames = scores.get("vmaf_frames") or int(self.mezz.duration * self.mezz.fps)
             metrics = dict(scores)
             metrics.update({
                 "bitrate_kbps": round(bitrate_kbps, 1),
@@ -150,7 +158,8 @@ class TrialRunner:
             })
             outcome = TrialOutcome(ok=True, objective=objective, metrics=metrics)
         except (FFmpegError, RuntimeError, OSError, KeyError, ValueError) as exc:
-            self._cleanup(out_path, vmaf_log)
+            self._cleanup(out_path, vmaf_log,
+                          *self.trials_dir.glob(f"t{n:04d}.passlog*"))
             return TrialOutcome(ok=False, objective=NEG_INF, error=str(exc))
 
         self._retain_or_drop(out_path, vmaf_log, params, outcome)

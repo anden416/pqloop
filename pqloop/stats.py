@@ -93,7 +93,9 @@ def summarize(jsonl_path) -> str:
     trials = [e for e in events if e.get("kind") == "trial"]
     done = next((e for e in events if e.get("kind") == "done"), {})
     real = [t for t in trials if not t.get("cached")]
-    ok = [t for t in real if t.get("ok")]
+    # best/top include cache hits: a resumed run that only replayed the cache
+    # still knows its best result — `real` only drives the encode-count line.
+    ok = [t for t in trials if t.get("ok")]
     lines = []
     lines.append(f"run:      {meta.get('run_id', Path(jsonl_path).stem)}")
     if meta:

@@ -37,6 +37,7 @@ CONFIG_DEFAULTS = {
     "overshoot_penalty": 1.0,
     "undershoot_penalty": 0.0,
     "seg_duration": 4.0,
+    "gop_duration": None,      # None = lock GOP to the segment (seg_duration)
     "pix_fmt": "yuv420p",
     "scale": "",
     "metric": "mean",
@@ -80,12 +81,53 @@ def merge_config(preset_cfg: dict, cli: dict) -> dict:
     for key, default in CONFIG_DEFAULTS.items():
         cli_val = cli.get(key)
         if cli_val is not None:
-            cfg[key] = cli_val
+            value = cli_val
         elif preset_cfg.get(key) is not None:
-            cfg[key] = preset_cfg[key]
+            value = preset_cfg[key]
         else:
-            cfg[key] = default
+            value = default
+        # copy collections so the merged config never aliases CONFIG_DEFAULTS
+        # or the preset dict (mutating cfg must not leak into either)
+        if isinstance(value, list):
+            value = list(value)
+        elif isinstance(value, dict):
+            value = dict(value)
+        cfg[key] = value
     return cfg
+
+
+def validate_config(cfg) -> None:
+    """Fail fast on malformed values — before any capture, mezzanine build, or
+    encode has spent time (some of these are otherwise parsed mid-trial)."""
+    scale = cfg.get("scale")
+    if scale:
+        w, x, h = str(scale).lower().partition("x")
+        if x != "x" or not (w.isdigit() and h.isdigit() and int(w) and int(h)):
+            raise ValueError(f"scale must be WxH, e.g. 1280x720 (got {scale!r})")
+    for key in ("clip_duration", "seg_duration", "maxrate_ratio", "bufsize_ratio"):
+        if float(cfg[key]) <= 0:
+            raise ValueError(f"{key} must be > 0 (got {cfg[key]!r})")
+    gop = cfg.get("gop_duration")
+    if gop is not None:
+        gop = float(gop)
+        if gop <= 0:
+            raise ValueError(f"gop_duration must be > 0 (got {cfg['gop_duration']!r})")
+        seg = float(cfg["seg_duration"])
+        mult = seg / gop
+        # the segment must hold a whole number of GOPs so every segment still
+        # starts on a keyframe (HLS/DASH require keyframe-aligned segment starts)
+        if round(mult) < 1 or abs(mult - round(mult)) > 1e-6:
+            raise ValueError(
+                f"seg_duration ({seg:g}s) must be a whole multiple of "
+                f"gop_duration ({gop:g}s) so every segment starts on a keyframe "
+                f"(e.g. a 2s GOP inside 4s segments)")
+    if float(cfg["clip_start"]) < 0:
+        raise ValueError(f"clip_start must be >= 0 (got {cfg['clip_start']!r})")
+    if int(cfg["vmaf_subsample"]) < 1:
+        raise ValueError(f"vmaf_subsample must be >= 1 (got {cfg['vmaf_subsample']!r})")
+    if cfg["metric"] not in vmaf.METRIC_KEYS:
+        raise ValueError(f"unknown metric {cfg['metric']!r} "
+                         f"(one of: {', '.join(sorted(vmaf.METRIC_KEYS))})")
 
 
 def parse_freezes(space, cfg_frozen, freeze_args, unfreeze_args) -> dict:
@@ -112,13 +154,17 @@ def parse_freezes(space, cfg_frozen, freeze_args, unfreeze_args) -> dict:
 # and e.g. x264/x265 share parameter names).
 OBJECTIVE_KEYS = ("encoder", "target_bitrate_kbps", "maxrate_ratio",
                   "bufsize_ratio", "bitrate_tolerance", "overshoot_penalty",
-                  "undershoot_penalty", "seg_duration", "pix_fmt", "scale",
-                  "metric", "vmaf_model", "vmaf_subsample", "two_pass",
-                  "extra_video_args")
+                  "undershoot_penalty", "seg_duration", "gop_duration",
+                  "pix_fmt", "scale", "metric", "vmaf_model", "vmaf_subsample",
+                  "two_pass", "extra_video_args")
 
 
 def objective_key(cfg) -> str:
-    return json.dumps({k: cfg.get(k) for k in OBJECTIVE_KEYS}, sort_keys=True)
+    # None-valued keys are omitted so adding an optional objective key (e.g.
+    # gop_duration, unset) doesn't change the signature of an existing preset
+    # and spuriously reset its cache; no non-optional key is ever None here.
+    return json.dumps({k: cfg.get(k) for k in OBJECTIVE_KEYS
+                       if cfg.get(k) is not None}, sort_keys=True)
 
 
 def reset_stale_state(data, opt_state, fingerprint, okey, log_fn=log) -> list:
@@ -147,7 +193,7 @@ def reset_stale_state(data, opt_state, fingerprint, okey, log_fn=log) -> list:
     return reasons
 
 
-def resolve_measure_ff(cfg, log_fn=log):
+def resolve_measure_ff(cfg):
     candidates = []
     for cand in (cfg.get("vmaf_ffmpeg"), cfg.get("ffmpeg"), "ffmpeg"):
         if cand and cand not in candidates:
@@ -192,6 +238,26 @@ def prepare_source(ff, cfg, input_url, workdir, capture_name="capture.ts"):
     return src, False
 
 
+def build_run_cfg(cfg) -> RunConfig:
+    return RunConfig(
+        encoder=cfg["encoder"],
+        target_bitrate_kbps=int(cfg["target_bitrate_kbps"]),
+        maxrate_ratio=float(cfg["maxrate_ratio"]),
+        bufsize_ratio=float(cfg["bufsize_ratio"]),
+        bitrate_tolerance=float(cfg["bitrate_tolerance"]),
+        overshoot_penalty=float(cfg["overshoot_penalty"]),
+        undershoot_penalty=float(cfg["undershoot_penalty"]),
+        seg_duration=float(cfg["seg_duration"]),
+        gop_duration=(float(cfg["gop_duration"])
+                      if cfg.get("gop_duration") else None),
+        pix_fmt=cfg["pix_fmt"], scale=cfg["scale"], metric=cfg["metric"],
+        vmaf_model=cfg["vmaf_model"], vmaf_subsample=int(cfg["vmaf_subsample"]),
+        vmaf_threads=int(cfg["vmaf_threads"]), two_pass=bool(cfg["two_pass"]),
+        extra_video_args=list(cfg["extra_video_args"] or []),
+        keep_trials=bool(cfg["keep_trials"]),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # optimize
 # --------------------------------------------------------------------------- #
@@ -210,6 +276,7 @@ def cmd_optimize(a) -> int:
         "overshoot_penalty": a.overshoot_penalty,
         "undershoot_penalty": a.undershoot_penalty,
         "seg_duration": a.seg_duration,
+        "gop_duration": a.gop_duration,
         "pix_fmt": a.pix_fmt,
         "scale": a.scale,
         "metric": a.metric,
@@ -254,6 +321,7 @@ def cmd_optimize(a) -> int:
         log(f"WARNING: the {cfg['encoder']!r} parameter space is EXPERIMENTAL "
             f"(not yet validated on hardware) — check commands with --dry-run first.")
     cfg["frozen"] = parse_freezes(space, cfg.get("frozen"), a.freeze, a.unfreeze)
+    validate_config(cfg)
     data["config"] = cfg
 
     ff_enc = FF(cfg["ffmpeg"] or "ffmpeg", cfg["ffprobe"] or None)
@@ -262,12 +330,37 @@ def cmd_optimize(a) -> int:
     if not a.dry_run and not ff_enc.has_encoder(cfg["encoder"]):
         raise RuntimeError(f"encoder {cfg['encoder']!r} not available in "
                            f"{cfg['ffmpeg']} ({ff_enc.version()})")
-    ff_meas = resolve_measure_ff(cfg)
 
     workdir = Path(a.workdir or Path("work") / data["name"])
+
+    if a.dry_run:
+        # Genuinely dry: the input is only probed (for GOP/deinterlace), and no
+        # libvmaf build is resolved, no live capture recorded, no mezzanine
+        # built, nothing written to the workdir or the preset.
+        src = media.probe_file(ff_enc, input_url, program=cfg.get("program"))
+        deinterlaced = media.deinterlace_decision(src, cfg["deinterlace"])
+        fps, fps_str = media.output_fps(src.fps, src.fps_str, deinterlaced,
+                                        cfg["deint_mode"])
+        mezz = media.MezzInfo(
+            path=str(workdir / "mezz.mkv"), width=src.width, height=src.height,
+            fps=fps, fps_str=fps_str, duration=float(cfg["clip_duration"]),
+            fingerprint="", deinterlaced=deinterlaced, filters="",
+            inputs_key="")
+        runner = TrialRunner(build_run_cfg(cfg), ff_enc, ff_enc, space, mezz,
+                             workdir, log)
+        params = space.defaults()
+        params.update((data.get("optimizer") or {}).get("current") or {})
+        params.update(cfg["frozen"])
+        cmd = [cfg["ffmpeg"] or "ffmpeg", "-hide_banner", "-nostdin",
+               *runner.encode_args(params, workdir / "trials" / "tXXXX.mp4")]
+        log("baseline encode command:")
+        log("  " + shlex.join(str(c) for c in cmd))
+        return 0
+
+    ff_meas = resolve_measure_ff(cfg)
     workdir.mkdir(parents=True, exist_ok=True)
 
-    src, was_live = prepare_source(ff_enc, cfg, input_url, workdir)
+    src, _ = prepare_source(ff_enc, cfg, input_url, workdir)
     mezz = media.get_or_build_mezzanine(
         mezz_builder_ff(ff_enc, ff_meas), src,
         start=float(cfg["clip_start"]),
@@ -282,32 +375,8 @@ def cmd_optimize(a) -> int:
         log(f"note: no curated parameter space for {cfg['encoder']!r}; only the "
             f"baseline (rate control + GOP + --extra-video-args) will be measured.")
 
-    run_cfg = RunConfig(
-        encoder=cfg["encoder"],
-        target_bitrate_kbps=int(cfg["target_bitrate_kbps"]),
-        maxrate_ratio=float(cfg["maxrate_ratio"]),
-        bufsize_ratio=float(cfg["bufsize_ratio"]),
-        bitrate_tolerance=float(cfg["bitrate_tolerance"]),
-        overshoot_penalty=float(cfg["overshoot_penalty"]),
-        undershoot_penalty=float(cfg["undershoot_penalty"]),
-        seg_duration=float(cfg["seg_duration"]),
-        pix_fmt=cfg["pix_fmt"], scale=cfg["scale"], metric=cfg["metric"],
-        vmaf_model=cfg["vmaf_model"], vmaf_subsample=int(cfg["vmaf_subsample"]),
-        vmaf_threads=int(cfg["vmaf_threads"]), two_pass=bool(cfg["two_pass"]),
-        extra_video_args=list(cfg["extra_video_args"] or []),
-        keep_trials=bool(cfg["keep_trials"]),
-    )
+    run_cfg = build_run_cfg(cfg)
     runner = TrialRunner(run_cfg, ff_enc, ff_meas, space, mezz, workdir, log)
-
-    if a.dry_run:
-        params = space.defaults()
-        params.update(opt_state.get("current") or {})
-        params.update(cfg["frozen"])
-        cmd = [cfg["ffmpeg"] or "ffmpeg", "-hide_banner", "-nostdin",
-               *runner.encode_args(params, workdir / "trials" / "tXXXX.mp4")]
-        log("baseline encode command:")
-        log("  " + shlex.join(str(c) for c in cmd))
-        return 0
 
     run_id = f"{run_stamp()}_{data['name']}"
     stats = stats_mod.StatsWriter(a.stats_dir or "stats", run_id)
@@ -328,7 +397,8 @@ def cmd_optimize(a) -> int:
         f"{mezz.duration:.1f}s  deinterlaced={mezz.deinterlaced}")
     log(f"  encoder:   {cfg['encoder']} @ {cfg['target_bitrate_kbps']}k "
         f"(maxrate {runner.rc.maxrate_kbps}k, bufsize {runner.rc.bufsize_kbps}k, "
-        f"GOP {runner.gop_len}, seg {cfg['seg_duration']:g}s"
+        f"GOP {runner.gop_len} ({run_cfg.gop_duration or run_cfg.seg_duration:g}s), "
+        f"seg {cfg['seg_duration']:g}s"
         + (", two-pass" if run_cfg.two_pass else "") + ")")
     log(f"  metric:    vmaf {cfg['metric']} "
         f"(model {cfg['vmaf_model'] or 'vmaf_v0.6.1 default'}, "
@@ -459,10 +529,14 @@ def cmd_encode(a) -> int:
     data = presets.load(preset_path)
     cfg = merge_config(data.get("config") or {}, {
         "seg_duration": a.seg_duration,
+        "gop_duration": a.gop_duration,
         "ffmpeg": a.ffmpeg,
+        "ffprobe": a.ffprobe,
+        "extra_input_args": shlex.split(a.extra_input_args) if a.extra_input_args else None,
         "target_bitrate_kbps": parse_bitrate_kbps(a.target_bitrate) if a.target_bitrate else None,
         "program": a.program,
     })
+    validate_config(cfg)
     space = get_space(cfg["encoder"])
 
     params = (data.get("best") or {}).get("params")
@@ -522,6 +596,10 @@ def cmd_report(a) -> int:
 def cmd_presets(a) -> int:
     if a.show:
         path = presets.resolve(a.show, a.presets_dir)
+        # load() creates a fresh preset for missing paths (optimize's
+        # create-on-first-run behavior); --show should not present one as real
+        if not Path(path).exists():
+            raise ValueError(f"preset not found: {path}")
         print(json.dumps(presets.load(path), indent=2))
         return 0
     rows = presets.list_presets(a.presets_dir)
@@ -539,7 +617,7 @@ def cmd_presets(a) -> int:
 
 
 def cmd_probe(a) -> int:
-    ff = FF(a.ffmpeg or "ffmpeg")
+    ff = FF(a.ffmpeg or "ffmpeg", a.ffprobe or None)
     if media.is_live_url(a.input):
         log(f"probing live stream {a.input} ...")
     data = ff.probe(a.input)
@@ -590,7 +668,13 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--reuse-capture", action=Bool, default=None,
                    help="live input: reuse an existing capture (same url/program) "
                         "instead of recapturing, so runs can resume")
-    o.add_argument("--seg-duration", type=float, help="segment/GOP duration in seconds (default 4)")
+    o.add_argument("--seg-duration", type=float,
+                   help="segment duration in seconds (default 4); also the GOP "
+                        "unless --gop-duration is given")
+    o.add_argument("--gop-duration", type=float,
+                   help="GOP/keyframe interval in seconds, independent of the "
+                        "segment (default: = --seg-duration). Must divide the "
+                        "segment evenly, e.g. 2 with --seg-duration 4")
     o.add_argument("--scale", help="encode at WxH (VMAF still compares at source resolution)")
     o.add_argument("--pix-fmt", help="encode pixel format (default yuv420p)")
     o.add_argument("--deinterlace", choices=("auto", "on", "off"))
@@ -655,6 +739,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "mp4 = single progressive (faststart) mp4 file")
     e.add_argument("--hls-segment-type", choices=("fmp4", "mpegts"), default="fmp4")
     e.add_argument("--seg-duration", type=float)
+    e.add_argument("--gop-duration", type=float,
+                   help="GOP/keyframe interval in seconds (default: = seg duration)")
     e.add_argument("--target-bitrate", help="override preset bitrate")
     e.add_argument("--audio-bitrate", default="128k",
                    help="audio bitrate (default 128k)")
@@ -667,6 +753,9 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--program", type=int,
                    help="MPTS input: transport stream program to capture/probe")
     e.add_argument("--ffmpeg")
+    e.add_argument("--ffprobe")
+    e.add_argument("--extra-input-args",
+                   help="extra ffmpeg input args (live tuning etc.)")
     e.set_defaults(func=cmd_encode)
 
     r = sub.add_parser("report", help="summarize a stats .jsonl (writes CSV too)")
@@ -684,6 +773,7 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--program", type=int,
                     help="MPTS input: transport stream program to inspect")
     pb.add_argument("--ffmpeg")
+    pb.add_argument("--ffprobe")
     pb.set_defaults(func=cmd_probe)
 
     return p

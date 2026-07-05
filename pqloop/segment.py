@@ -34,7 +34,8 @@ def final_encode(ff, space, params, cfg, source, out_dir, fmt="hls",
         maxrate_kbps=int(round(target * float(cfg_get(cfg, "maxrate_ratio", 1.10)))),
         bufsize_kbps=int(round(target * float(cfg_get(cfg, "bufsize_ratio", 2.0)))),
     )
-    gop_len = max(1, int(round(seg * fps)))
+    gop_dur = cfg_get(cfg, "gop_duration", None) or seg
+    gop_len = max(1, int(round(gop_dur * fps)))
 
     args = ["-y"]
     if start:
@@ -42,10 +43,10 @@ def final_encode(ff, space, params, cfg, source, out_dir, fmt="hls",
     args += ["-i", source.path]
     if duration:
         args += ["-t", f"{float(duration):.3f}"]
-    args += ["-map", "0:v:0"]
+    args += source.video_map()
     use_audio = want_audio and source.has_audio
     if use_audio:
-        args += ["-map", "0:a:0?"]
+        args += source.audio_map()
     if filters:
         args += ["-vf", ",".join(filters)]
     if deinterlaced:

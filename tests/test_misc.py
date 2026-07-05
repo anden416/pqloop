@@ -96,6 +96,27 @@ class StatsTest(unittest.TestCase):
             self.assertIn("diminishing_returns", summary)
             self.assertIn("91.5", summary)
 
+    def test_cached_only_resume_still_reports_best(self):
+        # a resumed run may replay entirely from the trial cache: 0 encodes,
+        # but the best/top tables must still be produced from cached rows
+        with tempfile.TemporaryDirectory() as td:
+            w = stats.StatsWriter(td, "run2")
+            w.event("meta", config={"encoder": "libx264"})
+            w.event("trial", n=1, phase="baseline", label="baseline",
+                    cached=True, ok=True, objective=90.0,
+                    params={"preset": "medium"},
+                    metrics={"vmaf_mean": 90.0, "bitrate_kbps": 6000})
+            w.event("trial", n=2, phase="refine", label="preset=slow",
+                    cached=True, ok=True, objective=93.25,
+                    params={"preset": "slow"},
+                    metrics={"vmaf_mean": 93.25, "bitrate_kbps": 6010})
+            w.event("done", stop_reason="converged", elapsed_s=1)
+            w.close()
+            summary = stats.summarize(w.path)
+            self.assertIn("best:", summary)
+            self.assertIn("93.25", summary)
+            self.assertIn("0 encodes (2 cache hits)", summary)
+
 
 if __name__ == "__main__":
     unittest.main()
