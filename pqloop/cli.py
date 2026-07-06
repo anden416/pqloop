@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import shutil
 import signal
@@ -49,6 +50,12 @@ CONFIG_DEFAULTS = {
     "two_pass": False,
     "deinterlace": "auto",
     "deint_mode": "field",
+    # source normalization (None = off/auto so legacy objective keys survive)
+    "src_primaries": None,
+    "src_trc": None,
+    "tonemap": None,           # None = auto: engage when the source trc is PQ/HLG
+    "norm_scale": None,        # WxH the source is normalized to (mezz + finals)
+    "audio_stream": None,      # 0-based index among audio streams (None = first)
     "clip_start": 0.0,
     "clip_duration": 30.0,
     "capture_duration": None,
@@ -106,6 +113,29 @@ def validate_config(cfg) -> None:
         w, x, h = str(scale).lower().partition("x")
         if x != "x" or not (w.isdigit() and h.isdigit() and int(w) and int(h)):
             raise ValueError(f"scale must be WxH, e.g. 1280x720 (got {scale!r})")
+    norm_scale = cfg.get("norm_scale")
+    if norm_scale:
+        w, x, h = str(norm_scale).lower().partition("x")
+        if x != "x" or not (w.isdigit() and h.isdigit() and int(w) and int(h)):
+            raise ValueError(f"norm_scale must be WxH, e.g. 1920x1080 "
+                             f"(got {norm_scale!r})")
+        if int(w) % 2 or int(h) % 2:
+            raise ValueError(f"norm_scale dimensions must be even for yuv420 "
+                             f"subsampling (got {norm_scale!r})")
+    tonemap = cfg.get("tonemap")
+    if tonemap is not None and tonemap not in media.TONEMAP_MODES:
+        raise ValueError(f"unknown tonemap {tonemap!r} "
+                         f"(one of: {', '.join(media.TONEMAP_MODES)})")
+    for key in ("src_primaries", "src_trc"):
+        value = cfg.get(key)
+        # values are embedded into a setparams filtergraph — restrict them to
+        # bare ffmpeg color tokens (bt2020, smpte2084, arib-std-b67, ...)
+        if value is not None and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", str(value)):
+            raise ValueError(f"{key} must be an ffmpeg color name, "
+                             f"e.g. bt2020 or smpte2084 (got {value!r})")
+    audio_stream = cfg.get("audio_stream")
+    if audio_stream is not None and int(audio_stream) < 0:
+        raise ValueError(f"audio_stream must be >= 0 (got {audio_stream!r})")
     for key in ("clip_duration", "seg_duration", "maxrate_ratio", "bufsize_ratio"):
         if float(cfg[key]) <= 0:
             raise ValueError(f"{key} must be > 0 (got {cfg[key]!r})")
@@ -181,7 +211,8 @@ OBJECTIVE_KEYS = ("encoder", "target_bitrate_kbps", "maxrate_ratio",
                   "bufsize_ratio", "bitrate_tolerance", "overshoot_penalty",
                   "undershoot_penalty", "seg_duration", "gop_duration",
                   "pix_fmt", "scale", "metric", "vmaf_model", "vmaf_subsample",
-                  "two_pass", "extra_video_args")
+                  "two_pass", "extra_video_args",
+                  "src_primaries", "src_trc", "tonemap", "norm_scale")
 
 
 def objective_key(cfg) -> str:
@@ -244,6 +275,19 @@ def mezz_builder_ff(ff_enc, ff_meas):
     return ff_enc if ff_enc.has_encoder("libx264") else ff_meas
 
 
+def require_norm_caps(ff, norm_filters, what) -> None:
+    """The normalization chain needs libzimg filters that not every build
+    carries (vendor/static builds); fail before hours of encoding, not mid-run."""
+    needed = sorted({f.partition("=")[0] for f in norm_filters}
+                    & {"zscale", "tonemap"})
+    for name in needed:
+        if not ff.has_filter(name):
+            raise RuntimeError(
+                f"{what} ffmpeg ({ff.ffmpeg}) lacks the {name!r} filter needed "
+                f"for HDR normalization — point --ffmpeg at a build with "
+                f"libzimg (e.g. the system ffmpeg), or pass --tonemap off")
+
+
 def prepare_source(ff, cfg, input_url, workdir, capture_name="capture.ts"):
     if media.is_live_url(input_url):
         seconds = cfg.get("capture_duration") or (
@@ -257,9 +301,11 @@ def prepare_source(ff, cfg, input_url, workdir, capture_name="capture.ts"):
             program=cfg.get("program"),
             reuse=bool(cfg.get("reuse_capture")), log=log)
         # the capture is a single-program TS, so no program selection here
-        src = media.probe_file(ff, captured)
+        src = media.probe_file(ff, captured,
+                               audio_stream=cfg.get("audio_stream"))
         return src, True
-    src = media.probe_file(ff, input_url, program=cfg.get("program"))
+    src = media.probe_file(ff, input_url, program=cfg.get("program"),
+                           audio_stream=cfg.get("audio_stream"))
     return src, False
 
 
@@ -328,6 +374,11 @@ def optimize_cli_cfg(a) -> dict:
         "adopt_eps": a.adopt_eps,
         "max_passes": a.max_passes,
         "keep_trials": a.keep_trials,
+        "src_primaries": a.src_primaries,
+        "src_trc": a.src_trc,
+        "tonemap": a.tonemap,
+        "norm_scale": a.norm_scale,
+        "audio_stream": a.audio_stream,
         "last_input": a.input,
     }
 
@@ -344,6 +395,7 @@ def cmd_optimize(a) -> int:
     if not input_url:
         raise ValueError("no input: pass --input FILE|udp://... "
                          "(presets remember their last input)")
+    input_url = media.resolve_input(input_url)
     cfg["last_input"] = input_url
     if not cfg["target_bitrate_kbps"]:
         raise ValueError("no target bitrate: pass --target-bitrate, e.g. -b 6000k")
@@ -372,14 +424,17 @@ def cmd_optimize(a) -> int:
         # Genuinely dry: the input is only probed (for GOP/deinterlace), and no
         # libvmaf build is resolved, no live capture recorded, no mezzanine
         # built, nothing written to the workdir or the preset.
-        src = media.probe_file(ff_enc, input_url, program=cfg.get("program"))
+        src = media.probe_file(ff_enc, input_url, program=cfg.get("program"),
+                               audio_stream=cfg.get("audio_stream"))
         deinterlaced = media.deinterlace_decision(src, cfg["deinterlace"])
         fps, fps_str = media.output_fps(src.fps, src.fps_str, deinterlaced,
                                         cfg["deint_mode"])
+        norm_w, norm_h = media.norm_dims(src, cfg)
         mezz = media.MezzInfo(
-            path=str(mezz_dir / "mezz.mkv"), width=src.width, height=src.height,
+            path=str(mezz_dir / "mezz.mkv"), width=norm_w, height=norm_h,
             fps=fps, fps_str=fps_str, duration=float(cfg["clip_duration"]),
-            fingerprint="", deinterlaced=deinterlaced, filters="",
+            fingerprint="", deinterlaced=deinterlaced,
+            filters=",".join(media.normalization_filters(src, cfg)),
             inputs_key="")
         runner = TrialRunner(build_run_cfg(cfg), ff_enc, ff_enc, space, mezz,
                              workdir, log)
@@ -397,12 +452,16 @@ def cmd_optimize(a) -> int:
     mezz_dir.mkdir(parents=True, exist_ok=True)
 
     src, _ = prepare_source(ff_enc, cfg, input_url, mezz_dir)
+    norm = media.normalization_filters(src, cfg)
+    builder_ff = mezz_builder_ff(ff_enc, ff_meas)
+    if norm:
+        require_norm_caps(builder_ff, norm, "mezzanine")
     mezz = media.get_or_build_mezzanine(
-        mezz_builder_ff(ff_enc, ff_meas), src,
+        builder_ff, src,
         start=float(cfg["clip_start"]),
         duration=float(cfg["clip_duration"]),
         deint=cfg["deinterlace"], deint_mode=cfg["deint_mode"],
-        out_path=mezz_dir / "mezz.mkv", log=log)
+        out_path=mezz_dir / "mezz.mkv", norm_filters=norm, log=log)
 
     opt_state = dict(data.get("optimizer") or {})
     reset_stale_state(data, opt_state, mezz.fingerprint, objective_key(cfg), log)
@@ -572,6 +631,11 @@ def cmd_encode(a) -> int:
         "extra_input_args": shlex.split(a.extra_input_args) if a.extra_input_args else None,
         "target_bitrate_kbps": parse_bitrate_kbps(a.target_bitrate) if a.target_bitrate else None,
         "program": a.program,
+        "src_primaries": a.src_primaries,
+        "src_trc": a.src_trc,
+        "tonemap": a.tonemap,
+        "norm_scale": a.norm_scale,
+        "audio_stream": a.audio_stream,
     })
     validate_config(cfg)
     space = get_space(cfg["encoder"])
@@ -585,6 +649,7 @@ def cmd_encode(a) -> int:
     input_url = a.input or cfg.get("last_input")
     if not input_url:
         raise ValueError("no input: pass --input FILE|udp://...")
+    input_url = media.resolve_input(input_url)
 
     out_dir = Path(a.output_dir)
     if media.is_live_url(input_url):
@@ -594,9 +659,14 @@ def cmd_encode(a) -> int:
                                       out_dir / "_capture.ts",
                                       cfg.get("extra_input_args") or [],
                                       program=cfg.get("program"), log=log)
-        src = media.probe_file(ff, captured)
+        src = media.probe_file(ff, captured,
+                               audio_stream=cfg.get("audio_stream"))
     else:
-        src = media.probe_file(ff, input_url, program=cfg.get("program"))
+        src = media.probe_file(ff, input_url, program=cfg.get("program"),
+                               audio_stream=cfg.get("audio_stream"))
+    norm = media.normalization_filters(src, cfg)
+    if norm:
+        require_norm_caps(ff, norm, "encode")
 
     log(f"encoding with params: {json.dumps(params, sort_keys=True)}")
     result = final_encode(ff, space, params, cfg, src, out_dir,
@@ -628,6 +698,11 @@ def cmd_package(a) -> int:
             "seg_duration": a.seg_duration,
             "extra_input_args": shlex.split(a.extra_input_args) if a.extra_input_args else None,
             "program": a.program,
+            "src_primaries": a.src_primaries,
+            "src_trc": a.src_trc,
+            "tonemap": a.tonemap,
+            "norm_scale": a.norm_scale,
+            "audio_stream": a.audio_stream,
         })
         validate_config(cfg)
         if not cfg["target_bitrate_kbps"]:
@@ -650,6 +725,7 @@ def cmd_package(a) -> int:
     if not a.input and len({u for u in last_inputs if u}) > 1:
         log(f"warning: presets disagree on their last input; "
             f"using {input_url} (pass -i to override)")
+    input_url = media.resolve_input(input_url)
 
     out_dir = Path(a.output_dir)
     work_dir = out_dir / "_work"
@@ -663,9 +739,21 @@ def cmd_package(a) -> int:
             ff_mux, input_url, float(a.capture_duration), work_dir / "capture.ts",
             first_cfg.get("extra_input_args") or [],
             program=first_cfg.get("program"), reuse=not a.no_reuse, log=log)
-        src = media.probe_file(ff_mux, captured)
+        src = media.probe_file(ff_mux, captured,
+                               audio_stream=first_cfg.get("audio_stream"))
     else:
-        src = media.probe_file(ff_mux, input_url, program=first_cfg.get("program"))
+        src = media.probe_file(ff_mux, input_url,
+                               program=first_cfg.get("program"),
+                               audio_stream=first_cfg.get("audio_stream"))
+
+    # each rung encodes with its own binary — every distinct one must be able
+    # to run the normalization chain its rung asks for
+    norm_checked = set()
+    for rung in rungs:
+        rung_norm = media.normalization_filters(src, rung.cfg)
+        if rung_norm and rung.ff.ffmpeg not in norm_checked:
+            require_norm_caps(rung.ff, rung_norm, f"rung {rung.preset_name}")
+            norm_checked.add(rung.ff.ffmpeg)
 
     rungs.sort(key=lambda r: r.target_kbps)
     for rung in rungs:
@@ -699,11 +787,17 @@ def cmd_package(a) -> int:
     log(f"muxing {a.format} package -> {main_output}")
     ff_mux.run(mux, timeout=package.mux_timeout(dur, len(rungs)))
 
+    video_codecs = package.video_codec_strings(rungs, inter["video"])
     if a.format in ("hls", "cmaf"):
         fixed = package.fixup_master(out_dir / "master.m3u8", fps=rungs[0].fps,
-                                     audio_codec=package.AAC_CODEC if inter["audio"] else None)
+                                     audio_codec=package.AAC_CODEC if inter["audio"] else None,
+                                     video_codecs=video_codecs)
         if fixed:
             log("master playlist fixup: " + "; ".join(fixed))
+    if a.format in ("dash", "cmaf"):
+        fixed = package.fixup_mpd(out_dir / "manifest.mpd", video_codecs)
+        if fixed:
+            log("manifest fixup: " + "; ".join(fixed))
 
     lines, level_warnings = package.stream_report(rungs, inter["video"])
     log("rungs:")
@@ -745,7 +839,9 @@ def _parse_cli(parser, argv, context):
 # package; rungs must agree on them or the shared reference clip would be
 # rebuilt per rung and packaging would fail after hours of optimization
 LADDER_UNIFORM_KEYS = ("encoder", "seg_duration", "deinterlace", "deint_mode",
-                       "clip_start", "clip_duration", "program")
+                       "clip_start", "clip_duration", "program",
+                       "src_primaries", "src_trc", "tonemap", "norm_scale",
+                       "audio_stream")
 
 
 def cmd_ladder(a) -> int:
@@ -771,6 +867,7 @@ def cmd_ladder(a) -> int:
     if not input_url:
         raise ValueError("no input: pass --input FILE|udp://... "
                          "(ladders remember their last input)")
+    input_url = media.resolve_input(input_url)
     live = media.is_live_url(input_url)
     if live and a.output_dir and not a.capture_duration:
         raise ValueError("live input with -o: pass --capture-duration SECONDS "
@@ -813,18 +910,22 @@ def cmd_ladder(a) -> int:
         first_cfg = next(iter(merged_cfgs.values()))
         src = media.probe_file(FF(first_cfg["ffmpeg"] or "ffmpeg",
                                   first_cfg["ffprobe"] or None),
-                               input_url, program=first_cfg.get("program"))
-        src_aspect = src.width / src.height if src.height else 0
+                               input_url, program=first_cfg.get("program"),
+                               audio_stream=first_cfg.get("audio_stream"))
+        # rungs scale from the normalized reference, not the raw source
+        # (norm keys are ladder-uniform, so any rung's merged cfg works)
+        ref_w, ref_h = media.norm_dims(src, first_cfg)
+        ref_aspect = ref_w / ref_h if ref_h else 0
         for rung in order:
             if not rung["scale"]:
                 continue
             w, h = (int(v) for v in rung["scale"].split("x"))
-            if h > src.height:
+            if h > ref_h:
                 log(f"warning: rung {rung['preset']} upscales the "
-                    f"{src.width}x{src.height} source to {rung['scale']}")
-            if src_aspect and abs(w / h - src_aspect) / src_aspect > 0.02:
+                    f"{ref_w}x{ref_h} reference to {rung['scale']}")
+            if ref_aspect and abs(w / h - ref_aspect) / ref_aspect > 0.02:
                 log(f"warning: rung {rung['preset']} scale {rung['scale']} "
-                    f"distorts the source aspect ratio ({src.width}x{src.height})")
+                    f"distorts the reference aspect ratio ({ref_w}x{ref_h})")
 
     spec["rungs"] = rungs
     spec["last_input"] = input_url
@@ -924,18 +1025,42 @@ def cmd_probe(a) -> int:
     ff = FF(a.ffmpeg or "ffmpeg", a.ffprobe or None)
     if media.is_live_url(a.input):
         log(f"probing live stream {a.input} ...")
-    data = ff.probe(a.input)
-    src = media.parse_probe(data, a.input, program=a.program)
+    resolved = media.resolve_input(a.input)
+    data = ff.probe(resolved)
+    src = media.parse_probe(data, resolved, program=a.program)
     interlaced = src.interlaced
     fps_out, _ = media.output_fps(src.fps, src.fps_str, interlaced, "field")
-    print(f"input:       {src.path}")
+    if str(resolved) != str(a.input):
+        print(f"input:       {a.input}  (IMF package)")
+        print(f"cpl:         {resolved}")
+    else:
+        print(f"input:       {src.path}")
     programs = [p.get("program_id") for p in data.get("programs") or []]
     if programs:
         print(f"programs:    {', '.join(str(p) for p in programs)}"
               "   (select one with --program)")
     print(f"video:       {src.video_codec} {src.width}x{src.height} "
           f"{src.pix_fmt} {src.fps:g}fps field_order={src.field_order}")
-    print(f"duration:    {src.duration:.1f}s   audio: {'yes' if src.has_audio else 'no'}")
+    print(f"color:       primaries={src.color_primaries or '?'} "
+          f"transfer={src.color_transfer or '?'} "
+          f"matrix={src.color_space or '?'} range={src.color_range or '?'} "
+          f"{src.bit_depth}-bit" + (" RGB" if src.is_rgb else ""))
+    if src.color_transfer in media.HDR_TRCS:
+        kind = "PQ" if src.color_transfer == "smpte2084" else "HLG"
+        print(f"             HDR ({kind}) source — tone-mapped to SDR bt709 "
+              f"unless --tonemap off")
+    elif (src.is_rgb or src.bit_depth > 8) and not src.color_transfer:
+        print(f"             color tags unknown — if this is an HDR master, "
+              f"assert them with --src-primaries/--src-trc "
+              f"(e.g. bt2020 / smpte2084)")
+    if src.audio_streams:
+        listing = ", ".join(
+            f"#{i} {astr['channels']}ch {astr['layout'] or astr['codec']}"
+            for i, astr in enumerate(src.audio_streams))
+        hint = "   (select with --audio-stream)" if len(src.audio_streams) > 1 else ""
+        print(f"duration:    {src.duration:.1f}s   audio: {listing}{hint}")
+    else:
+        print(f"duration:    {src.duration:.1f}s   audio: no")
     print(f"interlaced:  {interlaced}"
           + (f" -> --deinterlace auto will apply bwdif "
              f"(field mode gives {fps_out:g}fps)" if interlaced else ""))
@@ -945,6 +1070,27 @@ def cmd_probe(a) -> int:
 # --------------------------------------------------------------------------- #
 # parser
 # --------------------------------------------------------------------------- #
+
+def _add_source_args(sp) -> None:
+    """Source normalization + stream selection flags, shared by every
+    subcommand that reads the original source (optimize/encode/package/ladder)."""
+    sp.add_argument("--src-primaries",
+                    help="assert the source color primaries when the container "
+                         "is untagged (e.g. bt2020 for an HDR master)")
+    sp.add_argument("--src-trc",
+                    help="assert the source transfer characteristic (e.g. "
+                         "smpte2084 for PQ); an HDR transfer engages tone mapping")
+    sp.add_argument("--tonemap", choices=media.TONEMAP_MODES,
+                    help="HDR->SDR tone mapping: auto (default; engages when "
+                         "the source transfer is PQ/HLG), off, or an operator")
+    sp.add_argument("--norm-scale", metavar="WxH",
+                    help="normalize the source to this resolution before "
+                         "optimization and encoding — the VMAF reference for "
+                         "every rung (e.g. 1920x1080 for a UHD master)")
+    sp.add_argument("--audio-stream", type=int, metavar="N",
+                    help="0-based audio stream to use (default first; "
+                         "'pqloop probe' lists them)")
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -981,6 +1127,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "segment evenly, e.g. 2 with --seg-duration 4")
     o.add_argument("--scale", help="encode at WxH (VMAF still compares at source resolution)")
     o.add_argument("--pix-fmt", help="encode pixel format (default yuv420p)")
+    _add_source_args(o)
     o.add_argument("--deinterlace", choices=("auto", "on", "off"))
     o.add_argument("--deint-mode", choices=("field", "frame"),
                    help="field: bwdif to double rate (50i->50p); frame: keep rate")
@@ -1060,6 +1207,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="live input: seconds to record")
     e.add_argument("--program", type=int,
                    help="MPTS input: transport stream program to capture/probe")
+    _add_source_args(e)
     e.add_argument("--ffmpeg")
     e.add_argument("--ffprobe")
     e.add_argument("--extra-input-args",
@@ -1091,6 +1239,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="live input: seconds to record")
     pk.add_argument("--program", type=int,
                     help="MPTS input: transport stream program to capture/probe")
+    _add_source_args(pk)
     pk.add_argument("--h264-level",
                     help="cap the H.264 level at encode time, e.g. 4.1 (the "
                          "encoder clamps refs to fit; re-optimizing with "
@@ -1144,6 +1293,7 @@ def build_parser() -> argparse.ArgumentParser:
     la.add_argument("--gop-duration", type=float)
     la.add_argument("--metric", choices=sorted(vmaf.METRIC_KEYS))
     la.add_argument("--pix-fmt")
+    _add_source_args(la)
     la.add_argument("--deinterlace", choices=("auto", "on", "off"))
     la.add_argument("--deint-mode", choices=("field", "frame"))
     la.add_argument("--two-pass", action=Bool, default=None)

@@ -227,6 +227,232 @@ class MezzanineMapTest(unittest.TestCase):
             args = ff.calls[0]
             self.assertEqual(args[args.index("-map") + 1], "0:4")
 
+    def test_norm_filters_slot_between_deint_and_yuv420p(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "src.mxf"
+            f.write_bytes(b"master content")
+            src = _source(f, field_order="progressive")
+            ff = FakeMezzFF()
+            media.get_or_build_mezzanine(
+                ff, src, 0, 20, "off", "field", Path(td) / "mezz.mkv",
+                norm_filters=["setparams=color_trc=smpte2084",
+                              "scale=1920:1080:flags=lanczos"])
+            args = ff.calls[0]
+            self.assertEqual(args[args.index("-vf") + 1],
+                             "setparams=color_trc=smpte2084,"
+                             "scale=1920:1080:flags=lanczos,format=yuv420p")
+
+
+ASSETMAP_NS = "http://www.smpte-ra.org/schemas/429-9/2007/AM"
+
+
+def _write_imf(d, cpls=("CPL_a.xml",), with_assetmap=True):
+    d = Path(d)
+    assets = []
+    for name in cpls:
+        (d / name).write_text(
+            '<?xml version="1.0"?>'
+            '<CompositionPlaylist xmlns="http://www.smpte-ra.org/schemas/'
+            '2067-3/2013"><Id>urn:uuid:1</Id></CompositionPlaylist>')
+        assets.append(f"<Asset><Id>urn:uuid:{name}</Id><ChunkList><Chunk>"
+                      f"<Path>{name}</Path></Chunk></ChunkList></Asset>")
+    (d / "OPL_x.xml").write_text(
+        '<?xml version="1.0"?><OutputProfileList/>')
+    (d / "PKL_x.xml").write_text(
+        '<?xml version="1.0"?><PackingList/>')
+    (d / "video.mxf").write_bytes(b"mxf")
+    assets.append("<Asset><Id>urn:uuid:opl</Id><ChunkList><Chunk>"
+                  "<Path>OPL_x.xml</Path></Chunk></ChunkList></Asset>")
+    assets.append("<Asset><Id>urn:uuid:pkl</Id><PackingList>true</PackingList>"
+                  "<ChunkList><Chunk><Path>PKL_x.xml</Path></Chunk>"
+                  "</ChunkList></Asset>")
+    assets.append("<Asset><Id>urn:uuid:mxf</Id><ChunkList><Chunk>"
+                  "<Path>video.mxf</Path></Chunk></ChunkList></Asset>")
+    if with_assetmap:
+        (d / "ASSETMAP.xml").write_text(
+            f'<?xml version="1.0"?><AssetMap xmlns="{ASSETMAP_NS}">'
+            f'<AssetList>{"".join(assets)}</AssetList></AssetMap>')
+
+
+class ResolveInputTest(unittest.TestCase):
+    def test_directory_resolves_to_the_cpl_via_assetmap(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_imf(td)
+            self.assertEqual(media.resolve_input(td),
+                             str(Path(td) / "CPL_a.xml"))
+
+    def test_glob_fallback_without_assetmap(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_imf(td, with_assetmap=False)
+            self.assertEqual(media.resolve_input(td),
+                             str(Path(td) / "CPL_a.xml"))
+
+    def test_files_and_live_urls_pass_through(self):
+        self.assertEqual(media.resolve_input("input/clip.ts"), "input/clip.ts")
+        self.assertEqual(media.resolve_input("udp://@239.0.0.1:1234"),
+                         "udp://@239.0.0.1:1234")
+
+    def test_multiple_cpls_and_no_cpl_raise(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_imf(td, cpls=("CPL_a.xml", "CPL_b.xml"))
+            with self.assertRaisesRegex(ValueError, "multiple CPLs"):
+                media.resolve_input(td)
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "notes.txt").write_text("not a package")
+            with self.assertRaisesRegex(ValueError, "no composition playlist"):
+                media.resolve_input(td)
+
+
+class ProbeColorTest(unittest.TestCase):
+    def _data(self, **video_over):
+        video = {"index": 0, "codec_type": "video", "width": 3840,
+                 "height": 2160, "avg_frame_rate": "60000/1001",
+                 "codec_name": "jpeg2000", "pix_fmt": "rgb48le",
+                 "field_order": "progressive"}
+        video.update(video_over)
+        return {"streams": [video], "format": {"duration": "719.0"}}
+
+    def test_captures_color_tags_and_bit_depth(self):
+        src = media.parse_probe(self._data(
+            color_primaries="bt2020", color_transfer="smpte2084",
+            color_space="unknown", color_range="pc",
+            bits_per_raw_sample="12"), "m.mxf")
+        self.assertEqual(src.color_primaries, "bt2020")
+        self.assertEqual(src.color_transfer, "smpte2084")
+        self.assertEqual(src.color_space, "")       # unknown normalizes away
+        self.assertEqual(src.color_range, "pc")
+        self.assertEqual(src.bit_depth, 12)
+        self.assertTrue(src.is_rgb)
+
+    def test_bit_depth_falls_back_to_pix_fmt(self):
+        self.assertEqual(media.parse_probe(self._data(), "m.mxf").bit_depth, 16)
+        self.assertEqual(media.parse_probe(
+            self._data(pix_fmt="yuv420p10le"), "m.mxf").bit_depth, 10)
+        src = media.parse_probe(self._data(pix_fmt="yuv420p"), "m.mxf")
+        self.assertEqual(src.bit_depth, 8)
+        self.assertFalse(src.is_rgb)
+
+
+class AudioStreamsTest(unittest.TestCase):
+    def _data(self):
+        return {"streams": [
+            {"index": 0, "codec_type": "video", "width": 3840, "height": 2160,
+             "avg_frame_rate": "60000/1001", "codec_name": "jpeg2000",
+             "pix_fmt": "rgb48le"},
+            {"index": 1, "codec_type": "audio", "channels": 6,
+             "channel_layout": "5.1(side)", "codec_name": "pcm_s24le"},
+            {"index": 2, "codec_type": "audio", "channels": 2,
+             "channel_layout": "stereo", "codec_name": "pcm_s24le"},
+        ], "format": {"duration": "719.0"}}
+
+    def test_all_streams_listed_default_first(self):
+        src = media.parse_probe(self._data(), "m.mxf")
+        self.assertEqual([a["channels"] for a in src.audio_streams], [6, 2])
+        self.assertEqual(src.audio_index, 1)
+        self.assertEqual(src.audio_map(), ["-map", "0:1"])
+
+    def test_audio_stream_selects_by_ordinal(self):
+        src = media.parse_probe(self._data(), "m.mxf", audio_stream=1)
+        self.assertEqual(src.audio_index, 2)
+        self.assertEqual(src.audio_map(), ["-map", "0:2"])
+        self.assertTrue(src.has_audio)
+
+    def test_out_of_range_raises_with_listing(self):
+        with self.assertRaisesRegex(RuntimeError, r"#0 6ch 5.1\(side\)"):
+            media.parse_probe(self._data(), "m.mxf", audio_stream=2)
+
+
+def _hdr_source(**over):
+    src = SourceInfo(path="m.mxf", width=3840, height=2160, fps=59.94,
+                     fps_str="60000/1001", field_order="progressive",
+                     duration=719.0, has_audio=True, video_codec="jpeg2000",
+                     pix_fmt="rgb48le", bit_depth=12, is_rgb=True)
+    for key, value in over.items():
+        setattr(src, key, value)
+    return src
+
+
+MERIDIAN_CFG = {"src_primaries": "bt2020", "src_trc": "smpte2084",
+                "norm_scale": "1920x1080"}
+
+
+class NormalizationFiltersTest(unittest.TestCase):
+    def test_sdr_source_with_defaults_is_a_noop(self):
+        src = _source("in.ts", field_order="progressive")
+        self.assertEqual(media.normalization_filters(src, {}), [])
+        self.assertFalse(media.norm_engaged(src, {}))
+
+    def test_asserted_hdr_master_gets_the_full_chain(self):
+        self.assertEqual(
+            media.normalization_filters(_hdr_source(), MERIDIAN_CFG),
+            ["setparams=color_primaries=bt2020:color_trc=smpte2084:range=pc",
+             "zscale=t=linear:npl=100",
+             "format=gbrpf32le",
+             "zscale=p=bt709",
+             "tonemap=hable:desat=0",
+             "zscale=t=bt709:m=bt709:r=tv",
+             "scale=1920:1080:flags=lanczos"])
+
+    def test_probed_pq_tags_engage_automatically(self):
+        src = _hdr_source(is_rgb=False, pix_fmt="yuv420p10le", bit_depth=10,
+                          color_primaries="bt2020", color_transfer="smpte2084")
+        filters = media.normalization_filters(src, {})
+        self.assertTrue(media.norm_engaged(src, {}))
+        self.assertIn("setparams=color_primaries=bt2020:color_trc=smpte2084",
+                      filters)
+        self.assertIn("tonemap=hable:desat=0", filters)
+
+    def test_tonemap_off_disables_the_chain_but_keeps_asserts_and_scale(self):
+        cfg = dict(MERIDIAN_CFG, tonemap="off")
+        filters = media.normalization_filters(_hdr_source(), cfg)
+        self.assertEqual(filters, [
+            "setparams=color_primaries=bt2020:color_trc=smpte2084:range=pc",
+            "scale=1920:1080:flags=lanczos"])
+
+    def test_explicit_operator_replaces_hable(self):
+        cfg = dict(MERIDIAN_CFG, tonemap="mobius")
+        self.assertIn("tonemap=mobius:desat=0",
+                      media.normalization_filters(_hdr_source(), cfg))
+
+    def test_engaged_without_primaries_raises(self):
+        with self.assertRaisesRegex(ValueError, "src-primaries"):
+            media.normalization_filters(_hdr_source(),
+                                        {"src_trc": "smpte2084"})
+
+    def test_norm_scale_alone_downscales_sdr_sources(self):
+        src = _source("in.ts", field_order="progressive")
+        src.width, src.height = 3840, 2160
+        self.assertEqual(media.normalization_filters(
+            src, {"norm_scale": "1920x1080"}),
+            ["scale=1920:1080:flags=lanczos"])
+        # already at the target and not tonemapping -> nothing to do
+        src.width, src.height = 1920, 1080
+        self.assertEqual(media.normalization_filters(
+            src, {"norm_scale": "1920x1080"}), [])
+
+    def test_norm_dims(self):
+        src = _hdr_source()
+        self.assertEqual(media.norm_dims(src, MERIDIAN_CFG), (1920, 1080))
+        self.assertEqual(media.norm_dims(src, {}), (3840, 2160))
+
+
+class MezzKeyNormTest(unittest.TestCase):
+    def test_norm_filters_change_the_key_only_when_set(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "src.mxf"
+            f.write_bytes(b"content")
+            src = _source(f)
+            base = media._mezz_inputs_key(src, 0, 20, False, "field")
+            self.assertNotIn("norm", base)   # legacy keys keep their shape
+            normed = media._mezz_inputs_key(
+                src, 0, 20, False, "field",
+                norm_filters=["tonemap=hable:desat=0"])
+            self.assertNotEqual(normed, base)
+            other = media._mezz_inputs_key(
+                src, 0, 20, False, "field",
+                norm_filters=["tonemap=mobius:desat=0"])
+            self.assertNotEqual(other, normed)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,8 @@ def _ladder_ns(**over):
         no_screen=False, freeze=None, keep_trials=None, vmaf_model=None,
         vmaf_subsample=None, vmaf_threads=None, ffmpeg=None, ffprobe=None,
         vmaf_ffmpeg=None, extra_video_args=None, extra_input_args=None,
+        src_primaries=None, src_trc=None, tonemap=None, norm_scale=None,
+        audio_stream=None,
         format="hls", hls_segment_type="fmp4", audio_bitrate="128k",
         no_audio=False, start=None, duration=None, h264_level=None,
         clean=False, no_verify=False)
@@ -156,6 +158,20 @@ class ArgvBuilderTest(unittest.TestCase):
         rung = {"scale": "", "bitrate_kbps": 6000, "preset": "lad_source"}
         argv = ladder.optimize_argv(rung, _ladder_ns(), "in.ts", "work/lad")
         self.assertNotIn("--scale", argv)
+
+    def test_source_normalization_flags_forwarded_to_both_steps(self):
+        a = _ladder_ns(src_primaries="bt2020", src_trc="smpte2084",
+                       tonemap="hable", norm_scale="1920x1080",
+                       audio_stream=1, output_dir="out/abr")
+        parser = build_parser()
+        for argv in (ladder.optimize_argv(self.RUNG, a, "in.mxf", "work/lad"),
+                     ladder.package_argv(["lad_720p"], a, "in.mxf")):
+            ns = parser.parse_args(argv)
+            self.assertEqual(ns.src_primaries, "bt2020", argv[0])
+            self.assertEqual(ns.src_trc, "smpte2084", argv[0])
+            self.assertEqual(ns.tonemap, "hable", argv[0])
+            self.assertEqual(ns.norm_scale, "1920x1080", argv[0])
+            self.assertEqual(ns.audio_stream, 1, argv[0])
 
     def test_package_argv_parses(self):
         a = _ladder_ns(output_dir="out/abr", duration=60.0, h264_level="4.1",

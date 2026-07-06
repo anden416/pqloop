@@ -324,6 +324,112 @@ class FixupMasterTest(unittest.TestCase):
         self.assertEqual(attrs, {"BANDWIDTH": "1", "CODECS": '"a,b"',
                                  "AUDIO": '"g"'})
 
+    def test_bare_hevc_codecs_completed_valid_strings_untouched(self):
+        # the dash muxer's CMAF master carries a bare (spec-invalid) hvc1
+        base = self._package_dir(MASTER_FFMPEG.replace(
+            'CODECS="avc1.64001f"', 'CODECS="hvc1"'))
+        fixed = package.fixup_master(base / "master.m3u8", fps=50.0,
+                                     audio_codec="mp4a.40.2",
+                                     video_codecs=["hvc1.1.6.L123.B0"])
+        self.assertIn("hevc codec strings completed", fixed)
+        self.assertEqual(self._stream_inf(base)["CODECS"],
+                         '"hvc1.1.6.L123.B0,mp4a.40.2"')
+        # already-valid strings (hlsenc's avc1) are left alone
+        base = self._package_dir(MASTER_FFMPEG)
+        fixed = package.fixup_master(base / "master.m3u8", fps=50.0,
+                                     audio_codec="mp4a.40.2",
+                                     video_codecs=["hvc1.1.6.L123.B0"])
+        self.assertNotIn("hevc codec strings completed", fixed)
+        self.assertEqual(self._stream_inf(base)["CODECS"],
+                         '"avc1.64001f,mp4a.40.2"')
+
+
+class Rfc6381HevcTest(unittest.TestCase):
+    def test_profiles_and_tiers(self):
+        self.assertEqual(package.rfc6381_hevc("Main", 123), "hvc1.1.6.L123.B0")
+        self.assertEqual(package.rfc6381_hevc("Main 10", 120, "High"),
+                         "hvc1.2.4.H120.B0")
+
+    def test_unknown_profile_or_level_yields_none(self):
+        self.assertIsNone(package.rfc6381_hevc("Rext", 123))
+        self.assertIsNone(package.rfc6381_hevc("Main", 0))
+
+    def test_strings_built_from_probed_intermediates(self):
+        hevc_ff = FakeFF(probe_result={"streams": [
+            {"codec_type": "video", "codec_name": "hevc",
+             "profile": "Main", "level": 123}]})
+        h264_ff = FakeFF()   # default probe: h264 High L40
+        rungs = [_rung(name="a", encoder="libx265", ff=hevc_ff),
+                 _rung(name="b", kbps=1000, ff=h264_ff)]
+        self.assertEqual(
+            package.video_codec_strings(rungs, ["a.mp4", "b.mp4"]),
+            ["hvc1.1.6.L123.B0", None])
+
+
+MPD_BARE = """\
+<?xml version="1.0" encoding="utf-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static">
+<AdaptationSet id="0" contentType="video">
+<Representation id="0" codecs="hvc1" bandwidth="4500000"/>
+<Representation id="1" codecs="hvc1" bandwidth="2400000"/>
+</AdaptationSet>
+<AdaptationSet id="1" contentType="audio">
+<Representation id="2" codecs="mp4a.40.2" bandwidth="128000"/>
+</AdaptationSet>
+</MPD>
+"""
+
+
+class FixupMpdTest(unittest.TestCase):
+    def _mpd(self, text=MPD_BARE):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        path = Path(td.name) / "manifest.mpd"
+        path.write_text(text)
+        return path
+
+    def test_bare_codecs_rewritten_in_rung_order(self):
+        path = self._mpd()
+        fixed = package.fixup_mpd(path, ["hvc1.1.6.L123.B0",
+                                         "hvc1.1.6.L120.B0"])
+        self.assertEqual(fixed, ["hevc codec strings completed"])
+        text = path.read_text()
+        self.assertIn('codecs="hvc1.1.6.L123.B0" bandwidth="4500000"', text)
+        self.assertIn('codecs="hvc1.1.6.L120.B0" bandwidth="2400000"', text)
+        self.assertIn('codecs="mp4a.40.2"', text)   # audio untouched
+
+    def test_idempotent_and_shape_guarded(self):
+        path = self._mpd()
+        package.fixup_mpd(path, ["hvc1.1.6.L123.B0", "hvc1.1.6.L120.B0"])
+        first = path.read_text()
+        self.assertEqual(package.fixup_mpd(
+            path, ["hvc1.1.6.L123.B0", "hvc1.1.6.L120.B0"]), [])
+        self.assertEqual(path.read_text(), first)
+        # count mismatch (or an avc1 manifest) -> untouched
+        path = self._mpd()
+        self.assertEqual(package.fixup_mpd(path, ["hvc1.1.6.L123.B0"]), [])
+        self.assertEqual(path.read_text(), MPD_BARE)
+        self.assertEqual(package.fixup_mpd(self._mpd(), [None, None]), [])
+
+
+class ResolveOutputNormTest(unittest.TestCase):
+    def test_scaleless_rung_takes_the_normalized_dimensions(self):
+        rung = _rung()
+        rung.cfg["norm_scale"] = "1920x1080"
+        src = _source()
+        src.width, src.height = 3840, 2160
+        package.resolve_output(rung, src)
+        self.assertEqual((rung.width, rung.height), (1920, 1080))
+        package.assign_names([rung])
+        self.assertEqual(rung.name, "1080p")
+
+    def test_explicit_rung_scale_still_wins(self):
+        rung = _rung()
+        rung.cfg["norm_scale"] = "1920x1080"
+        rung.cfg["scale"] = "1280x720"
+        package.resolve_output(rung, _source())
+        self.assertEqual((rung.width, rung.height), (1280, 720))
+
 
 class VerifyTest(unittest.TestCase):
     def _entries(self, kfs, idrs):
@@ -358,6 +464,28 @@ class VerifyTest(unittest.TestCase):
         a = self._rung_with("a", [0.0, 4.0, 8.0], [0.0])
         problems = package.verify_package([a], ["a.mp4"], 4.0)
         self.assertTrue(any("no IDR at segment boundary 4s" in p for p in problems))
+
+    def test_ntsc_rate_boundaries_compare_frame_quantized(self):
+        # at 59.94fps a 4s boundary has no frame on it: -force_key_frames
+        # gte(t,n*4) lands the IDR on the first frame at/after the boundary
+        # (4.004, 8.008, 12.012, ...) — that IS the aligned position, not a
+        # miss. Times below are the real x265 output pattern.
+        fps = 60000 / 1001
+        kfs = [package._frame_quantized(4.0 * n, fps) for n in range(8)]
+        a = self._rung_with("a", kfs, kfs[:2])
+        b = self._rung_with("b", kfs, kfs[:2])
+        for r in (a, b):
+            r.fps = fps
+        problems = package.verify_package([a, b], ["a.mp4", "b.mp4"], 4.0)
+        self.assertEqual(problems, [])
+
+    def test_frame_quantized_is_identity_for_integer_rates(self):
+        for n in range(10):
+            self.assertEqual(package._frame_quantized(4.0 * n, 50.0), 4.0 * n)
+        self.assertAlmostEqual(
+            package._frame_quantized(12.0, 60000 / 1001), 720 * 1001 / 60000)
+        self.assertAlmostEqual(
+            package._frame_quantized(20.0, 60000 / 1001), 1199 * 1001 / 60000)
 
 
 class PresetParamsTest(unittest.TestCase):

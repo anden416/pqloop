@@ -150,5 +150,54 @@ class TimeoutTest(unittest.TestCase):
         self.assertGreaterEqual(timeout, 1800.0)
 
 
+def _hdr_source():
+    return SourceInfo(path="m.mxf", width=3840, height=2160, fps=59.94,
+                      fps_str="60000/1001", field_order="progressive",
+                      duration=719.0, has_audio=False, video_codec="jpeg2000",
+                      pix_fmt="rgb48le", bit_depth=12, is_rgb=True)
+
+
+class NormalizationTest(unittest.TestCase):
+    CFG = {"target_bitrate_kbps": 4500, "src_primaries": "bt2020",
+           "src_trc": "smpte2084", "norm_scale": "1920x1080"}
+
+    def _encode(self, cfg, source, encoder="libx265"):
+        ff = FakeFF()
+        space = get_space(encoder)
+        with tempfile.TemporaryDirectory() as td:
+            segment.final_encode(ff, space, space.defaults(), cfg, source, td,
+                                 fmt="cmaf")
+        return ff.calls[0][0]
+
+    def test_norm_chain_precedes_quantization_and_rung_scale(self):
+        cfg = dict(self.CFG, scale="1280x720")
+        args = self._encode(cfg, _hdr_source())
+        vf = args[args.index("-vf") + 1]
+        self.assertEqual(vf.split(","), [
+            "setparams=color_primaries=bt2020:color_trc=smpte2084:range=pc",
+            "zscale=t=linear:npl=100",
+            "format=gbrpf32le",
+            "zscale=p=bt709",
+            "tonemap=hable:desat=0",
+            "zscale=t=bt709:m=bt709:r=tv",
+            "scale=1920:1080:flags=lanczos",
+            "format=yuv420p",                       # trials scaled 8-bit frames
+            "scale=1280:720:flags=lanczos"])        # rung scale comes last
+
+    def test_tonemapped_output_is_tagged_sdr_bt709(self):
+        args = self._encode(dict(self.CFG), _hdr_source())
+        for flag, value in (("-color_primaries", "bt709"),
+                            ("-color_trc", "bt709"),
+                            ("-colorspace", "bt709"),
+                            ("-color_range", "tv")):
+            self.assertEqual(args[args.index(flag) + 1], value, flag)
+
+    def test_sdr_source_with_unset_keys_is_unchanged(self):
+        args = self._encode({"target_bitrate_kbps": 3000}, _source(),
+                            encoder="libx264")
+        self.assertNotIn("-vf", args)               # no filters at all
+        self.assertNotIn("-color_primaries", args)
+
+
 if __name__ == "__main__":
     unittest.main()

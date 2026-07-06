@@ -166,6 +166,33 @@ scores — they were measured against a different objective — but keeps the
 best-known parameters and impact ordering as priors. For a 4K ladder, also
 switch the model: `--vmaf-model version=vmaf_4k_v0.6.1`.
 
+## HDR / IMF masters (VOD)
+
+Studio masters are supported end-to-end. Point `-i` at the package *directory* (or its CPL XML)
+and describe the source once; pqloop normalizes it to an SDR bt709 delivery
+reference that both the VMAF loop and the final encodes consume:
+
+```bash
+# what's in the package? (color, bit depth, audio streams)
+python3 -m pqloop probe -i input/MERIDIAN
+
+# one command: optimize a 4-rung HEVC ladder and package it as CMAF.
+# The master carries no color tags, so assert PQ/BT.2020; --norm-scale
+# makes 1080p the delivery/reference resolution; --audio-stream 1 picks
+# the mastered Lt/Rt stereo track over the 5.1
+python3 -m pqloop ladder -p meridian -i input/MERIDIAN --encoder libx265 \
+    --rung 1920x1080:4500k --rung 1280x720:2400k \
+    --rung 960x540:1200k --rung 640x360:600k \
+    --src-primaries bt2020 --src-trc smpte2084 --norm-scale 1920x1080 \
+    --audio-stream 1 --clip-start 300 --clip-duration 20 \
+    -o output/meridian --format cmaf
+```
+
+`--tonemap` controls the HDR→SDR mapping (default `auto`: engages whenever
+the effective transfer is PQ/HLG; `off` disables it; or pick an operator
+like `mobius`). Tone-mapped outputs are tagged bt709/tv in the bitstream.
+Sources that are already SDR are untouched by all of this.
+
 ## Live / multicast inputs
 
 Live URLs (`udp://`, `rtp://`, `srt://`, `rist://`) work like files: pqloop

@@ -19,6 +19,11 @@ def build_encode_args(space, params, cfg, source, out_dir, fmt="hls",
     deinterlaced = media.deinterlace_decision(source, cfg_get(cfg, "deinterlace", "auto"))
     deint_mode = cfg_get(cfg, "deint_mode", "field")
     filters = media.build_filters(deinterlaced, deint_mode)
+    norm = media.normalization_filters(source, cfg)
+    if norm:
+        # pin the exact pipeline the trials saw: the mezzanine quantized to
+        # 8-bit yuv420p after normalization, so the rung scale below must too
+        filters += norm + ["format=yuv420p"]
     scale = cfg_get(cfg, "scale", "")
     if scale:
         w, h = str(scale).lower().split("x", 1)
@@ -57,6 +62,11 @@ def build_encode_args(space, params, cfg, source, out_dir, fmt="hls",
             or (fmt == "hls" and hls_segment_type == "fmp4")):
         args += ["-tag:v", "hvc1"]
     args += ["-pix_fmt", cfg_get(cfg, "pix_fmt", "yuv420p")]
+    if media.norm_engaged(source, cfg):
+        # the tonemap chain outputs SDR bt709; say so in the bitstream VUI
+        # (players must not inherit the source's HDR interpretation)
+        args += ["-color_primaries", "bt709", "-color_trc", "bt709",
+                 "-colorspace", "bt709", "-color_range", "tv"]
     args += list(cfg_get(cfg, "extra_video_args", []) or [])
     if use_audio:
         args += ["-c:a", "aac", "-b:a", f"{int(audio_kbps)}k", "-ac", "2"]

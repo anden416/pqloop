@@ -15,6 +15,8 @@ B-frame delays across rungs still yield identical segment start times).
 from __future__ import annotations
 
 import json
+import math
+import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,7 +58,9 @@ def resolve_output(rung: Rung, source) -> None:
         w, h = str(scale).lower().split("x", 1)
         rung.width, rung.height = int(w), int(h)
     else:
-        rung.width, rung.height = source.width, source.height
+        # a scale-less rung outputs the *normalized* resolution, not the raw
+        # source's (a UHD master normalized to 1080p yields a 1080p rung)
+        rung.width, rung.height = media.norm_dims(source, rung.cfg)
 
 
 def assign_names(rungs) -> None:
@@ -263,8 +267,81 @@ def mux_timeout(duration_s, n_variants) -> float:
 
 
 # --------------------------------------------------------------------------- #
-# master playlist fixup
+# master playlist / manifest fixup
 # --------------------------------------------------------------------------- #
+
+def rfc6381_hevc(profile, level, tier=None) -> str:
+    """RFC 6381 codec string for the HEVC we produce (progressive, frame-only,
+    non-packed — constraint byte 0xB0, which is what x265 signals). None for
+    profiles we don't emit; callers then leave the manifest untouched."""
+    key = str(profile or "").strip().lower().replace(" ", "")
+    table = {"main": ("1", "6"), "main10": ("2", "4")}
+    if key not in table or not level:
+        return None
+    idc, compat = table[key]
+    t = "H" if str(tier or "").strip().lower() == "high" else "L"
+    return f"hvc1.{idc}.{compat}.{t}{int(level)}.B0"
+
+
+def video_codec_strings(rungs, video_paths) -> list:
+    """Per-rung RFC 6381 video codec string (rung order), None where nothing
+    needs fixing. ffmpeg's dash muxer writes a bare 'hvc1' into both manifests
+    (invalid — Safari and strict DASH players reject it); the real profile and
+    level come from probing the intermediates we just encoded."""
+    out = []
+    for r, path in zip(rungs, video_paths):
+        codec = None
+        try:
+            streams = r.ff.probe(path).get("streams", [])
+            st = next((s for s in streams
+                       if s.get("codec_type") == "video"), {})
+            if st.get("codec_name") == "hevc":
+                codec = rfc6381_hevc(st.get("profile"), st.get("level"),
+                                     st.get("tier"))
+        except FFmpegError:
+            pass
+        out.append(codec)
+    return out
+
+
+_BARE_HEVC = re.compile(r"^(hvc1|hev1)$")
+
+
+def _fix_codecs_attr(codecs, video_codec):
+    """Replace a bare hvc1/hev1 entry in an EXT-X CODECS value (unquoted)."""
+    parts = [p.strip() for p in codecs.split(",") if p.strip()]
+    fixed = False
+    for i, part in enumerate(parts):
+        if _BARE_HEVC.match(part):
+            parts[i] = video_codec
+            fixed = True
+    return ",".join(parts), fixed
+
+
+def fixup_mpd(mpd_path, video_codecs) -> list:
+    """Rewrite bare codecs="hvc1|hev1" Representation attributes in ffmpeg's
+    MPD with the full per-rung strings (document order matches mux stream
+    order, which is rung order). Idempotent via a trailing marker comment."""
+    mpd_path = Path(mpd_path)
+    codecs = [c for c in (video_codecs or []) if c]
+    if not codecs:
+        return []
+    try:
+        text = mpd_path.read_text()
+    except OSError:
+        return []
+    if "pqloop-fixup" in text:
+        return []
+    bare = re.findall(r'codecs="(?:hvc1|hev1)"', text)
+    if len(bare) != len(codecs):
+        return []   # unexpected manifest shape — leave it alone
+    it = iter(codecs)
+    fixed_text = re.sub(r'codecs="(?:hvc1|hev1)"',
+                        lambda _m: f'codecs="{next(it)}"', text)
+    fixed_text += f"<!-- pqloop-fixup ({__version__}): hevc codec strings -->\n"
+    mpd_path.write_text(fixed_text)
+    return ["hevc codec strings completed"]
+
 
 def _parse_attrs(text) -> dict:
     """EXT-X attribute list -> ordered dict; commas inside quotes are literal."""
@@ -327,15 +404,17 @@ def _playlist_bitrates(playlist_path):
     return int(round(peak or avg)), int(round(avg))
 
 
-def fixup_master(master_path, fps=None, audio_codec=None) -> list:
+def fixup_master(master_path, fps=None, audio_codec=None, video_codecs=None) -> list:
     """Post-process ffmpeg's master playlist into strict spec shape. What
     ffmpeg gets wrong (verified against the pinned build): variant BANDWIDTH
     excludes the audio rendition the variant will actually play; FRAME-RATE
     is never written; EXT-X-INDEPENDENT-SEGMENTS only reaches the media
     playlists. Older builds and the dash muxer's CMAF master additionally
-    carry average-based BANDWIDTH and no AVERAGE-BANDWIDTH — those are
-    recomputed from real segment sizes. Returns the list of fixes applied
-    (idempotent: a marker comment prevents double application)."""
+    carry average-based BANDWIDTH, no AVERAGE-BANDWIDTH, and a bare 'hvc1'
+    CODECS entry — bandwidths are recomputed from real segment sizes and the
+    codec entry is completed from `video_codecs` (rung order, matching the
+    variant order). Returns the list of fixes applied (idempotent: a marker
+    comment prevents double application)."""
     master_path = Path(master_path)
     lines = master_path.read_text().splitlines()
     if any("pqloop-fixup" in line for line in lines):
@@ -350,11 +429,13 @@ def fixup_master(master_path, fps=None, audio_codec=None) -> list:
     audio_rates = _playlist_bitrates(master_path.parent / audio_uri) if audio_uri else None
 
     out = []
+    variant_no = -1
     for idx, line in enumerate(lines):
         if not line.startswith("#EXT-X-STREAM-INF:"):
             out.append(line)
             continue
         attrs = _parse_attrs(line[len("#EXT-X-STREAM-INF:"):])
+        variant_no += 1
         uri = next((l for l in lines[idx + 1:] if l and not l.startswith("#")), None)
         if uri and (not _int_attr(attrs.get("BANDWIDTH"))
                     or "AVERAGE-BANDWIDTH" not in attrs):
@@ -363,6 +444,14 @@ def fixup_master(master_path, fps=None, audio_codec=None) -> list:
                 attrs["BANDWIDTH"] = str(rates[0])
                 attrs["AVERAGE-BANDWIDTH"] = str(rates[1])
                 fixed.add("bandwidth measured from segments")
+        video_codec = (video_codecs[variant_no]
+                       if video_codecs and variant_no < len(video_codecs) else None)
+        if video_codec and "CODECS" in attrs:
+            codecs, changed = _fix_codecs_attr(attrs["CODECS"].strip('"'),
+                                               video_codec)
+            if changed:
+                attrs["CODECS"] = f'"{codecs}"'
+                fixed.add("hevc codec strings completed")
         if audio_rates and attrs.get("AUDIO"):
             attrs["BANDWIDTH"] = str(_int_attr(attrs.get("BANDWIDTH")) + audio_rates[0])
             if "AVERAGE-BANDWIDTH" in attrs:
@@ -422,6 +511,17 @@ def stream_report(rungs, video_paths):
     return lines, warnings
 
 
+def _frame_quantized(t, fps) -> float:
+    """The first achievable frame time at or after t — where
+    `-force_key_frames expr:gte(t,n*seg)` actually lands an IDR when a
+    boundary falls between frames (fractional rates: 4s at 59.94fps is
+    239.76 frames, so the keyframe sits at 4.004s). Integer rates return
+    t unchanged."""
+    if not fps or t <= 0:
+        return t
+    return math.ceil(t * fps - 1e-6) / fps
+
+
 def verify_package(rungs, video_paths, seg_duration, log=None) -> list:
     """Cross-rung keyframe alignment from the intermediates (demux-only over
     the whole file), plus a bounded IDR spot-check over the first two
@@ -443,7 +543,8 @@ def verify_package(rungs, video_paths, seg_duration, log=None) -> list:
         idrs = [float(d["pts_time"]) for d in frames
                 if d.get("key_frame") == "1" and d.get("pict_type") == "I"]
         for boundary in (0.0, float(seg_duration)):
-            if boundary < window and not any(abs(t - boundary) <= tol for t in idrs):
+            expected = _frame_quantized(boundary, r.fps)
+            if boundary < window and not any(abs(t - expected) <= tol for t in idrs):
                 problems.append(f"{r.name}: no IDR at segment boundary {boundary:g}s")
 
     base = keyframes[0]
@@ -461,9 +562,9 @@ def verify_package(rungs, video_paths, seg_duration, log=None) -> list:
         missing = []
         n = 0
         while n * float(seg_duration) <= end + tol:
-            t = n * float(seg_duration)
+            t = _frame_quantized(n * float(seg_duration), r.fps)
             if not any(abs(k - t) <= tol for k in kfs):
-                missing.append(f"{t:g}s")
+                missing.append(f"{n * float(seg_duration):g}s")
             n += 1
         if missing:
             problems.append(f"{r.name}: no keyframe at segment boundaries "

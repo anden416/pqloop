@@ -44,6 +44,10 @@ class ValidateConfigTest(unittest.TestCase):
         # GOP that divides the segment evenly (incl. GOP == segment)
         cli.validate_config(self._cfg(seg_duration=4.0, gop_duration=2.0))
         cli.validate_config(self._cfg(seg_duration=4.0, gop_duration=4.0))
+        cli.validate_config(self._cfg(norm_scale="1920x1080", tonemap="hable",
+                                      src_primaries="bt2020",
+                                      src_trc="smpte2084", audio_stream=1))
+        cli.validate_config(self._cfg(src_trc="arib-std-b67"))
 
     def test_bad_values_raise_before_any_media_work(self):
         for over in ({"scale": "1280:720"}, {"scale": "0x720"},
@@ -52,7 +56,13 @@ class ValidateConfigTest(unittest.TestCase):
                      {"metric": "median"}, {"clip_start": -5},
                      {"gop_duration": 0},                            # non-positive
                      {"seg_duration": 4.0, "gop_duration": 3.0},     # 4 not a multiple of 3
-                     {"seg_duration": 4.0, "gop_duration": 8.0}):    # GOP longer than segment
+                     {"seg_duration": 4.0, "gop_duration": 8.0},     # GOP longer than segment
+                     {"norm_scale": "1920:1080"},
+                     {"norm_scale": "1919x1080"},                    # odd width
+                     {"tonemap": "hdr10"},
+                     {"src_trc": "bt709,evil"},                      # filtergraph injection
+                     {"src_primaries": "BT.2020"},                   # not a bare token
+                     {"audio_stream": -1}):
             with self.assertRaises(ValueError, msg=over):
                 cli.validate_config(self._cfg(**over))
 
@@ -83,7 +93,11 @@ class ObjectiveKeyTest(unittest.TestCase):
                          ("extra_video_args", ["-flags", "+cgop"]),
                          ("undershoot_penalty", 0.5),
                          ("gop_duration", 2.0),
-                         ("scale", "1280x720")):
+                         ("scale", "1280x720"),
+                         ("src_primaries", "bt2020"),
+                         ("src_trc", "smpte2084"),
+                         ("tonemap", "mobius"),
+                         ("norm_scale", "1920x1080")):
             cfg = self._base()
             cfg[key] = val
             self.assertNotEqual(base, cli.objective_key(cfg), key)
@@ -96,10 +110,19 @@ class ObjectiveKeyTest(unittest.TestCase):
         self.assertEqual(cli.objective_key(legacy),
                          cli.objective_key(self._base()))
 
+    def test_unset_norm_keys_match_legacy_key(self):
+        # same grandfathering for the source-normalization keys
+        legacy = self._base()
+        for key in ("src_primaries", "src_trc", "tonemap", "norm_scale"):
+            legacy.pop(key, None)
+        self.assertEqual(cli.objective_key(legacy),
+                         cli.objective_key(self._base()))
+
     def test_non_objective_settings_do_not(self):
         base = cli.objective_key(self._base())
         for key, val in (("vmaf_threads", 8), ("keep_trials", True),
-                         ("reuse_capture", True), ("max_passes", 9)):
+                         ("reuse_capture", True), ("max_passes", 9),
+                         ("audio_stream", 1)):
             cfg = self._base()
             cfg[key] = val
             self.assertEqual(base, cli.objective_key(cfg), key)
@@ -181,6 +204,28 @@ class ParserAliasTest(unittest.TestCase):
         enc = self.parser.parse_args(
             ["encode", "-p", "x", "-o", "out", "--record-duration", "30"])
         self.assertEqual(enc.capture_duration, 30.0)
+
+    def test_source_normalization_flags_on_all_source_commands(self):
+        flags = ["--src-primaries", "bt2020", "--src-trc", "smpte2084",
+                 "--tonemap", "hable", "--norm-scale", "1920x1080",
+                 "--audio-stream", "1"]
+        for argv in (["optimize", "-p", "x"],
+                     ["encode", "-p", "x", "-o", "out"],
+                     ["package", "-p", "x", "-o", "out"],
+                     ["ladder", "-p", "x"]):
+            ns = self.parser.parse_args(argv + flags)
+            self.assertEqual(ns.src_primaries, "bt2020", argv[0])
+            self.assertEqual(ns.src_trc, "smpte2084", argv[0])
+            self.assertEqual(ns.tonemap, "hable", argv[0])
+            self.assertEqual(ns.norm_scale, "1920x1080", argv[0])
+            self.assertEqual(ns.audio_stream, 1, argv[0])
+
+    def test_norm_keys_are_ladder_uniform(self):
+        # rungs share one mezzanine and one audio intermediate — the keys that
+        # define them must be enforced uniform across rung presets
+        for key in ("src_primaries", "src_trc", "tonemap", "norm_scale",
+                    "audio_stream"):
+            self.assertIn(key, cli.LADDER_UNIFORM_KEYS)
 
     def test_work_dir_spellings(self):
         for flag in ("--work-dir", "--workdir"):
