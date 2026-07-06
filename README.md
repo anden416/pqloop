@@ -6,7 +6,9 @@ your content over and over, measures each attempt with
 parameter space — always at your target bitrate — until improvements show
 diminishing returns. The result is a saved, resumable preset you can use to
 produce segmented streaming output (HLS/DASH/CMAF) for a packager origin, or
-a single (fragmented or progressive) mp4 file.
+a single (fragmented or progressive) mp4 file. For VOD, `pqloop ladder` runs
+the whole flow across an ABR ladder in one command: every rung optimized,
+then packaged into one keyframe-aligned multi-rendition HLS/DASH/CMAF output.
 
 ```
              ┌────────────────────────────────────────────┐
@@ -57,6 +59,11 @@ python3 -m pqloop encode -p sports -i input/match.ts -o output/sports_hls \
 python3 -m pqloop encode -p sports -i input/match.ts -o output/sports_cmaf \
     --format cmaf --duration 60
 
+# or a whole ABR ladder in one command — optimize every rung, then package
+# (full story under "Multi-resolution ladders" below)
+python3 -m pqloop ladder -p sports_abr -i input/match.ts \
+    --rung 1280x720:2800k --rung 640x360:700k -o output/abr
+
 # offline analysis
 python3 -m pqloop report stats/<run_id>.jsonl     # summary + CSV
 python3 -m pqloop presets                          # list saved presets
@@ -86,11 +93,37 @@ covered in this README is a plumbing override documented there.
 
 ## Multi-resolution ladders
 
-Each ladder rung is its own preset: same input, one preset per resolution,
-with `--scale` and that rung's bitrate. VMAF always compares against the
-source-resolution mezzanine (the trial encode is upscaled back for
-measurement), so scores are directly comparable across rungs and each rung's
-parameters get tuned for its own scaling/bitrate trade-offs:
+`pqloop ladder` is the one-command VOD flow: define the rungs once, and it
+optimizes every rung and packages the result —
+
+```bash
+python3 -m pqloop ladder -p sports_abr -i input/match.ts \
+    --rung 1920x1080:5800k --rung 1280x720:2800k --rung 960x540:1600k \
+    --rung 640x360:700k --rung 426x240:350k \
+    --clip-start 300 --clip-duration 20 --max-seconds 1800 \
+    -o output/abr --format hls
+```
+
+Each rung becomes an ordinary preset (`sports_abr_1080p`, ...) sharing one
+capture and one lossless mezzanine, optimized top-down with **warm starts**:
+every rung below the first begins from the rung above's best parameters and
+measured impact ordering, skipping the screening those measurements already
+paid for. Budgets (`--max-seconds`, `--max-trials`) apply per rung. Re-running
+the same command resumes every rung's search (cached trials replay instantly),
+re-uses packaging intermediates, and the ladder spec (`presets/sports_abr.json`)
+remembers the rungs and input. Omit `-o` to only optimize; `source:BITRATE`
+makes a rung at source resolution; `--no-seed` cold-starts every rung instead.
+Live inputs record the shared capture once and reuse it across rungs and
+re-runs automatically (fresh scores would otherwise reset every rung's cache);
+packaging a live input (`-o`) needs `--capture-duration` to bound the
+deliverable recording.
+
+Rungs can also be managed by hand — each is its own preset: same input, one
+preset per resolution, with `--scale` and that rung's bitrate. VMAF always
+compares against the source-resolution mezzanine (the trial encode is
+upscaled back for measurement), so scores are directly comparable across
+rungs and each rung's parameters get tuned for its own scaling/bitrate
+trade-offs:
 
 ```bash
 python3 -m pqloop optimize -i input/match.ts -p sports_1080p -b 6000k
@@ -118,8 +151,12 @@ with another `--format` re-packages without re-encoding, and an interrupted
 ladder resumes at the first missing rung. It validates cross-rung
 consistency (segment duration, frame rate, codec family), measures real
 peak/average `BANDWIDTH` into the master playlist, and verifies keyframe
-alignment across the finished intermediates. Single-rung output is still
-available via `pqloop encode -p sports_1080p -o output/1080p`.
+alignment across the finished intermediates. Each rung's codec profile/level
+is reported, with a warning when H.264 exceeds Level 4.1 (a common device
+ceiling — inherent for 1080p50+, otherwise usually the optimizer picking many
+reference frames; `--h264-level 4.1` clamps at encode time, or re-optimize
+that rung with `--freeze refs=4`). Single-rung output is still available via
+`pqloop encode -p sports_1080p -o output/1080p`.
 
 Changing `--scale` (or the bitrate) on an existing preset resets its cached
 scores — they were measured against a different objective — but keeps the
@@ -483,6 +520,7 @@ pqloop/            the package (stdlib only)
 presets/           saved presets (JSON, resumable)            --presets-dir
 stats/             per-run JSONL + CSV                        --stats-dir
 work/<preset>/     capture, mezzanine, best trial artifacts   --work-dir
+work/<ladder>/     shared capture + mezzanine, per-rung dirs  --work-dir
 tools/             optional: static ffmpeg with libvmaf for measurement
 ```
 

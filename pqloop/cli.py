@@ -20,7 +20,8 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from . import __version__, media, package, presets, stats as stats_mod, vmaf
+from . import (__version__, ladder as ladder_mod, media, package, presets,
+               stats as stats_mod, vmaf)
 from .encoders import codec_family, get_space, known_encoders
 from .ffmpeg import FF, FFmpegError
 from .optimizer import Optimizer, Settings, NEG_INF
@@ -129,6 +130,14 @@ def validate_config(cfg) -> None:
     if cfg["metric"] not in vmaf.METRIC_KEYS:
         raise ValueError(f"unknown metric {cfg['metric']!r} "
                          f"(one of: {', '.join(sorted(vmaf.METRIC_KEYS))})")
+
+
+def reject_ladder_spec(data, path) -> None:
+    """optimize/encode/package operate on single presets; running one against
+    a ladder spec would write optimizer state into the spec and corrupt it."""
+    if data.get("rungs"):
+        raise ValueError(f"{path} is a ladder spec, not a preset — "
+                         f"use 'pqloop ladder' (its rungs are separate presets)")
 
 
 def preset_params(data, space, name="preset", log_fn=log) -> dict:
@@ -278,12 +287,11 @@ def build_run_cfg(cfg) -> RunConfig:
 # optimize
 # --------------------------------------------------------------------------- #
 
-def cmd_optimize(a) -> int:
-    preset_path = presets.resolve(a.preset, a.presets_dir)
-    data = presets.load(preset_path)
-    resuming = bool(data.get("optimizer", {}).get("cache"))
-
-    cli_cfg = {
+def optimize_cli_cfg(a) -> dict:
+    """The optimize CLI namespace as a config dict for merge_config (None =
+    flag not given). Shared with the ladder pre-flight, which merges it
+    against each rung preset's stored config before any encode is spent."""
+    return {
         "encoder": a.encoder,
         "target_bitrate_kbps": parse_bitrate_kbps(a.target_bitrate) if a.target_bitrate else None,
         "maxrate_ratio": a.maxrate_ratio,
@@ -322,7 +330,15 @@ def cmd_optimize(a) -> int:
         "keep_trials": a.keep_trials,
         "last_input": a.input,
     }
-    cfg = merge_config(data.get("config") or {}, cli_cfg)
+
+
+def cmd_optimize(a) -> int:
+    preset_path = presets.resolve(a.preset, a.presets_dir)
+    data = presets.load(preset_path)
+    reject_ladder_spec(data, preset_path)
+    resuming = bool(data.get("optimizer", {}).get("cache"))
+
+    cfg = merge_config(data.get("config") or {}, optimize_cli_cfg(a))
 
     input_url = a.input or cfg.get("last_input")
     if not input_url:
@@ -348,6 +364,9 @@ def cmd_optimize(a) -> int:
                            f"{cfg['ffmpeg']} ({ff_enc.version()})")
 
     workdir = Path(a.workdir or Path("work") / data["name"])
+    # capture + mezzanine location; a ladder points every rung at one shared
+    # directory so the reference clip is recorded/built once, not per rung
+    mezz_dir = Path(a.mezz_dir) if a.mezz_dir else workdir
 
     if a.dry_run:
         # Genuinely dry: the input is only probed (for GOP/deinterlace), and no
@@ -358,7 +377,7 @@ def cmd_optimize(a) -> int:
         fps, fps_str = media.output_fps(src.fps, src.fps_str, deinterlaced,
                                         cfg["deint_mode"])
         mezz = media.MezzInfo(
-            path=str(workdir / "mezz.mkv"), width=src.width, height=src.height,
+            path=str(mezz_dir / "mezz.mkv"), width=src.width, height=src.height,
             fps=fps, fps_str=fps_str, duration=float(cfg["clip_duration"]),
             fingerprint="", deinterlaced=deinterlaced, filters="",
             inputs_key="")
@@ -375,14 +394,15 @@ def cmd_optimize(a) -> int:
 
     ff_meas = resolve_measure_ff(cfg)
     workdir.mkdir(parents=True, exist_ok=True)
+    mezz_dir.mkdir(parents=True, exist_ok=True)
 
-    src, _ = prepare_source(ff_enc, cfg, input_url, workdir)
+    src, _ = prepare_source(ff_enc, cfg, input_url, mezz_dir)
     mezz = media.get_or_build_mezzanine(
         mezz_builder_ff(ff_enc, ff_meas), src,
         start=float(cfg["clip_start"]),
         duration=float(cfg["clip_duration"]),
         deint=cfg["deinterlace"], deint_mode=cfg["deint_mode"],
-        out_path=workdir / "mezz.mkv", log=log)
+        out_path=mezz_dir / "mezz.mkv", log=log)
 
     opt_state = dict(data.get("optimizer") or {})
     reset_stale_state(data, opt_state, mezz.fingerprint, objective_key(cfg), log)
@@ -543,6 +563,7 @@ def cmd_encode(a) -> int:
     if not Path(preset_path).exists():
         raise ValueError(f"preset not found: {preset_path}")
     data = presets.load(preset_path)
+    reject_ladder_spec(data, preset_path)
     cfg = merge_config(data.get("config") or {}, {
         "seg_duration": a.seg_duration,
         "gop_duration": a.gop_duration,
@@ -601,6 +622,7 @@ def cmd_package(a) -> int:
         if not Path(preset_path).exists():
             raise ValueError(f"preset not found: {preset_path}")
         data = presets.load(preset_path)
+        reject_ladder_spec(data, preset_path)
         stored = data.get("config") or {}
         cfg = merge_config(stored, {
             "seg_duration": a.seg_duration,
@@ -703,6 +725,165 @@ def cmd_package(a) -> int:
             f"to re-package without re-encoding (--clean to remove)")
     log(f"done: {main_output}")
     return 1 if problems else 0
+
+
+# --------------------------------------------------------------------------- #
+# ladder
+# --------------------------------------------------------------------------- #
+
+def _parse_cli(parser, argv, context):
+    """argparse exits the process on bad argv; a ladder must instead fail its
+    pre-flight cleanly (a typo in --optimize-args must not kill rung 3 at
+    hour two — every invocation is parsed before rung 1 encodes anything)."""
+    try:
+        return parser.parse_args(argv)
+    except SystemExit:
+        raise ValueError(f"invalid {context} arguments: {shlex.join(argv)}")
+
+
+# merged-config keys that shape the shared capture/mezzanine or the final
+# package; rungs must agree on them or the shared reference clip would be
+# rebuilt per rung and packaging would fail after hours of optimization
+LADDER_UNIFORM_KEYS = ("encoder", "seg_duration", "deinterlace", "deint_mode",
+                       "clip_start", "clip_duration", "program")
+
+
+def cmd_ladder(a) -> int:
+    spec_path = presets.resolve(a.preset, a.presets_dir)
+    spec = ladder_mod.load_spec(spec_path, a.preset)
+    if not spec.get("rungs") and (spec.get("config") or spec.get("optimizer")):
+        raise ValueError(f"{spec_path} is a preset, not a ladder — "
+                         f"pick a different ladder name")
+
+    if a.rung:
+        rungs, orphans = ladder_mod.merge_rungs(
+            spec.get("rungs") or [], ladder_mod.parse_rungs(a.rung), spec["name"])
+        if orphans:
+            log(f"note: rung preset(s) no longer in the ladder: "
+                f"{', '.join(orphans)} (kept on disk, no longer packaged)")
+    else:
+        rungs = spec.get("rungs") or []
+        if not rungs:
+            raise ValueError("no rungs: pass --rung WxH:BITRATE "
+                             "(e.g. --rung 1280x720:2800k), or source:BITRATE")
+
+    input_url = a.input or spec.get("last_input")
+    if not input_url:
+        raise ValueError("no input: pass --input FILE|udp://... "
+                         "(ladders remember their last input)")
+    live = media.is_live_url(input_url)
+    if live and a.output_dir and not a.capture_duration:
+        raise ValueError("live input with -o: pass --capture-duration SECONDS "
+                         "(the package step records the deliverable separately)")
+
+    # ---- pre-flight: parse every invocation and simulate every rung config
+    # before any encode is spent
+    parser = build_parser()
+    work_root = Path(a.work_dir or Path("work") / spec["name"])
+    order = sorted(rungs, key=lambda r: -r["bitrate_kbps"])
+    plans, merged_cfgs = [], {}
+    for rung in order:
+        path = presets.resolve(rung["preset"], a.presets_dir)
+        data = presets.load(path)
+        reject_ladder_spec(data, path)
+        if Path(path).exists() and data.get("ladder") != spec["name"]:
+            raise ValueError(
+                f"preset {rung['preset']} already exists and does not belong "
+                f"to ladder {spec['name']!r} — optimizing would overwrite it "
+                f"(rename the ladder or move the preset aside)")
+        argv = ladder_mod.optimize_argv(rung, a, input_url, work_root, live=live)
+        ns = _parse_cli(parser, argv, f"rung {rung['preset']} optimize")
+        cfg = merge_config(data.get("config") or {}, optimize_cli_cfg(ns))
+        validate_config(cfg)
+        merged_cfgs[rung["preset"]] = cfg
+        plans.append((rung, ns, path))
+    for key in LADDER_UNIFORM_KEYS:
+        values = {name: cfg.get(key) for name, cfg in merged_cfgs.items()}
+        if len(set(values.values())) > 1:
+            raise ValueError(
+                f"rung presets disagree on {key} ({values}) — the rungs must "
+                f"share the reference clip and segment grid; pass the flag on "
+                f"the ladder command to align them")
+    pkg_ns = None
+    if a.output_dir:
+        pkg_argv = ladder_mod.package_argv([r["preset"] for r in order], a, input_url)
+        pkg_ns = _parse_cli(parser, pkg_argv, "package")
+
+    if not live:
+        first_cfg = next(iter(merged_cfgs.values()))
+        src = media.probe_file(FF(first_cfg["ffmpeg"] or "ffmpeg",
+                                  first_cfg["ffprobe"] or None),
+                               input_url, program=first_cfg.get("program"))
+        src_aspect = src.width / src.height if src.height else 0
+        for rung in order:
+            if not rung["scale"]:
+                continue
+            w, h = (int(v) for v in rung["scale"].split("x"))
+            if h > src.height:
+                log(f"warning: rung {rung['preset']} upscales the "
+                    f"{src.width}x{src.height} source to {rung['scale']}")
+            if src_aspect and abs(w / h - src_aspect) / src_aspect > 0.02:
+                log(f"warning: rung {rung['preset']} scale {rung['scale']} "
+                    f"distorts the source aspect ratio ({src.width}x{src.height})")
+
+    spec["rungs"] = rungs
+    spec["last_input"] = input_url
+    ladder_mod.save_spec(spec_path, spec)
+    log(f"ladder {spec['name']}: {len(order)} rung(s), optimizing top-down"
+        + (f", packaging -> {a.output_dir} ({a.format})" if a.output_dir else
+           " (no -o: optimize only)"))
+
+    # ---- optimize each rung, seeding fresh ones from the rung above
+    parent_state, parent_name = None, None
+    for rung, ns, path in plans:
+        data = presets.load(path)
+        if not data.get("optimizer"):
+            if parent_state and not a.no_seed:
+                ladder_mod.seed_data(data, spec["name"], *parent_state)
+                log(f"\nrung {rung['preset']}: seeded from {parent_name} "
+                    f"(its best point + measured impact order; already-measured "
+                    f"params skip screening)")
+            else:
+                ladder_mod.seed_data(data, spec["name"])
+                log(f"\nrung {rung['preset']}: fresh search")
+            presets.save(path, data)
+        else:
+            log(f"\nrung {rung['preset']}: resuming existing search state")
+        try:
+            rc = ns.func(ns)
+        except (ValueError, RuntimeError, FFmpegError) as exc:
+            raise RuntimeError(f"rung {rung['preset']}: {exc}") from exc
+        if rc == 130:
+            log("interrupted — re-run the same ladder command to resume")
+            return 130
+        if rc:
+            return rc
+        data = presets.load(path)
+        objective, stop = ladder_mod.rung_outcome(data)
+        if objective is None:
+            # exit code 0 covers every StopSearch, including baseline_failed
+            raise RuntimeError(
+                f"rung {rung['preset']} finished without a successful encode "
+                f"(stop reason: {stop or 'unknown'}) — fix the cause and "
+                f"re-run to resume the ladder")
+        space = get_space((data.get("config") or {}).get("encoder") or "libx264")
+        parent_state = (preset_params(data, space, name=rung["preset"]),
+                        (data.get("optimizer") or {}).get("sens") or {})
+        parent_name = rung["preset"]
+
+    # ---- package + summary
+    if pkg_ns is not None:
+        log("")
+        rc = pkg_ns.func(pkg_ns)
+        if rc:
+            return rc
+    log("\nladder summary (per-rung best on the optimization clip):")
+    for line in ladder_mod.summary_lines(
+            [presets.load(presets.resolve(r["preset"], a.presets_dir))
+             for r in order]):
+        log(line)
+    log(f"ladder spec: {spec_path}")
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -832,6 +1013,10 @@ def build_parser() -> argparse.ArgumentParser:
                                          "(auto-detected if omitted)")
     o.add_argument("--work-dir", "--workdir", dest="workdir",
                    help="working directory (default work/<preset>)")
+    o.add_argument("--mezz-dir",
+                   help="directory for the capture + mezzanine (default: the "
+                        "work dir); ladder rungs share one to record/build "
+                        "the reference clip once")
     o.add_argument("--stats-dir", help="statistics directory (default stats/)")
     o.add_argument("--keep-trials", action=Bool, default=None,
                    help="keep every trial encode + per-frame vmaf log")
@@ -923,6 +1108,75 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--extra-input-args",
                     help="extra ffmpeg input args for live capture")
     pk.set_defaults(func=cmd_package)
+
+    la = sub.add_parser("ladder",
+                        help="optimize every rung of an ABR ladder, then package it")
+    la.add_argument("-p", "--preset", required=True,
+                    help="ladder name; the spec (rungs, last input) is stored "
+                         "as <name>.json in --presets-dir")
+    la.add_argument("--presets-dir", default="presets")
+    la.add_argument("-i", "--input", help="input file or live url "
+                                          "(default: the ladder's last input)")
+    la.add_argument("--rung", action="append", metavar="WxH:BITRATE",
+                    help="ladder rung, e.g. 1280x720:2800k (repeat per rung; "
+                         "source:BITRATE = source resolution). Given rungs "
+                         "replace the stored set")
+    la.add_argument("-o", "--output-dir",
+                    help="package destination; omit to only optimize")
+    la.add_argument("--no-seed", action="store_true",
+                    help="cold-start every rung instead of seeding each from "
+                         "the rung above's best parameters")
+    la.add_argument("--work-dir", dest="work_dir",
+                    help="shared work root (default work/<ladder>); holds the "
+                         "capture + mezzanine and per-rung trial dirs")
+    la.add_argument("--optimize-args",
+                    help="extra raw flags appended to every rung's optimize "
+                         "invocation (escape hatch for anything not listed here)")
+    # forwarded to each rung's optimize run
+    la.add_argument("--encoder")
+    la.add_argument("--clip-start", help="optimization clip start (seconds or HH:MM:SS)")
+    la.add_argument("--clip-duration", type=float, help="optimization clip length")
+    la.add_argument("--capture-duration", "--record-duration",
+                    dest="capture_duration", type=float,
+                    help="live input: seconds to record (required with -o)")
+    la.add_argument("--program", type=int)
+    la.add_argument("--seg-duration", type=float)
+    la.add_argument("--gop-duration", type=float)
+    la.add_argument("--metric", choices=sorted(vmaf.METRIC_KEYS))
+    la.add_argument("--pix-fmt")
+    la.add_argument("--deinterlace", choices=("auto", "on", "off"))
+    la.add_argument("--deint-mode", choices=("field", "frame"))
+    la.add_argument("--two-pass", action=Bool, default=None)
+    la.add_argument("--min-gain", type=float)
+    la.add_argument("--adopt-eps", type=float)
+    la.add_argument("--max-trials", type=int, help="encode budget PER RUNG")
+    la.add_argument("--max-seconds", type=float, help="time budget PER RUNG")
+    la.add_argument("--target-score", type=float,
+                    help="per-rung stop score (careful: low rungs may never "
+                         "reach a score chosen for the top rung)")
+    la.add_argument("--max-passes", type=int)
+    la.add_argument("--no-screen", action="store_true")
+    la.add_argument("--freeze", action="append", metavar="NAME=VALUE")
+    la.add_argument("--keep-trials", action=Bool, default=None)
+    la.add_argument("--vmaf-model")
+    la.add_argument("--vmaf-subsample", type=int)
+    la.add_argument("--vmaf-threads", type=int)
+    la.add_argument("--ffmpeg")
+    la.add_argument("--ffprobe")
+    la.add_argument("--vmaf-ffmpeg")
+    la.add_argument("--extra-video-args")
+    la.add_argument("--extra-input-args")
+    # forwarded to the package step
+    la.add_argument("--format", choices=("hls", "dash", "cmaf"), default="hls")
+    la.add_argument("--hls-segment-type", choices=("fmp4", "mpegts"), default="fmp4")
+    la.add_argument("--audio-bitrate", default="128k")
+    la.add_argument("--no-audio", action="store_true")
+    la.add_argument("--start", help="package: start position in the input")
+    la.add_argument("--duration", type=float, help="package: only encode N seconds")
+    la.add_argument("--h264-level")
+    la.add_argument("--clean", action="store_true")
+    la.add_argument("--no-verify", action="store_true")
+    la.set_defaults(func=cmd_ladder)
 
     r = sub.add_parser("report", help="summarize a stats .jsonl (writes CSV too)")
     r.add_argument("stats_file")

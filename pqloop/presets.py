@@ -68,6 +68,18 @@ def list_presets(presets_dir):
             data = load(p)
         except (json.JSONDecodeError, OSError):
             continue
+        if data.get("rungs"):
+            # ladder spec, not a preset: show it as its own kind of row
+            out.append({
+                "name": data.get("name", p.stem),
+                "path": str(p),
+                "encoder": f"ladder({len(data['rungs'])})",
+                "target_kbps": None,
+                "best_objective": None,
+                "encodes": 0,
+                "updated": data.get("updated", ""),
+            })
+            continue
         best = data.get("best") or {}
         cfg = data.get("config") or {}
         out.append({

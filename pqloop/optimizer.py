@@ -159,6 +159,11 @@ class Optimizer:
         try:
             baseline = self._eval(self.current, "baseline", "baseline")
             if not baseline.ok:
+                # a cached failed baseline would replay the failure on every
+                # resume even after a transient cause (missing binary, busy
+                # encoder) is fixed — unlike mid-search failures, nothing
+                # routes around it, so let the next run retry it
+                self.cache.pop(self.signature(self.current), None)
                 raise StopSearch(f"baseline_failed: {baseline.error}")
             self.cur_obj = baseline.objective
             if self.s.screen and not self.screened:
