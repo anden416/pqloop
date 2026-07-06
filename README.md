@@ -31,8 +31,11 @@ input ──► mezzanine ──► encode trial ──► VMAF vs mezz ──�
   [BtbN static build](https://github.com/BtbN/FFmpeg-Builds/releases) dropped
   into `tools/ffmpeg-static/` works out of the box.)
 
-Run from the repo (`python3 -m pqloop ...`) or install: `pip install -e .`
-(gives the `pqloop` command).
+Run from the repo (`python3 -m pqloop ...`) or install the `pqloop` command:
+`pip install -e .` — editable, so it always runs the current checkout. On
+PEP 668 distros (Ubuntu 23.04+) outside a venv:
+`python3 -m pip install --user --break-system-packages -e .`
+(user-site only; pqloop has no dependencies, so nothing system-owned is touched).
 
 ## Quick start
 
