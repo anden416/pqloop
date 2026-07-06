@@ -101,13 +101,25 @@ python3 -m pqloop optimize -i input/match.ts -p sports_540p  -b 2000k --scale 96
 Every preset remembers its own scale, bitrate, and search state
 (`work/<preset>/` holds its mezzanine and artifacts), so rungs resume
 independently and can be tuned one after another or on different machines.
-Then encode each rung from its preset:
+Then package the rungs into one ABR deliverable — a master playlist (or MPD)
+whose variants are keyframe-aligned by construction, with one shared audio
+rendition:
 
 ```bash
-python3 -m pqloop encode -p sports_1080p -i input/match.ts -o output/1080p
-python3 -m pqloop encode -p sports_720p  -i input/match.ts -o output/720p
-python3 -m pqloop encode -p sports_540p  -i input/match.ts -o output/540p
+python3 -m pqloop package -p sports_1080p -p sports_720p -p sports_540p \
+    -i input/match.ts -o output/abr --format hls    # or dash / cmaf
 ```
+
+`package` encodes one video-only intermediate per rung (each with its own
+preset's tuned parameters and ffmpeg binary — hardware and software rungs
+mix freely), then remuxes everything in a single stream-copy pass. The
+intermediates are kept under `output/abr/_work/` and re-used: re-running
+with another `--format` re-packages without re-encoding, and an interrupted
+ladder resumes at the first missing rung. It validates cross-rung
+consistency (segment duration, frame rate, codec family), measures real
+peak/average `BANDWIDTH` into the master playlist, and verifies keyframe
+alignment across the finished intermediates. Single-rung output is still
+available via `pqloop encode -p sports_1080p -o output/1080p`.
 
 Changing `--scale` (or the bitrate) on an existing preset resets its cached
 scores — they were measured against a different objective — but keeps the

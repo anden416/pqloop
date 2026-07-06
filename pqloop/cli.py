@@ -13,14 +13,15 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import shutil
 import signal
 import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
 
-from . import __version__, media, presets, stats as stats_mod, vmaf
-from .encoders import get_space, known_encoders
+from . import __version__, media, package, presets, stats as stats_mod, vmaf
+from .encoders import codec_family, get_space, known_encoders
 from .ffmpeg import FF, FFmpegError
 from .optimizer import Optimizer, Settings, NEG_INF
 from .runner import RunConfig, TrialRunner
@@ -128,6 +129,21 @@ def validate_config(cfg) -> None:
     if cfg["metric"] not in vmaf.METRIC_KEYS:
         raise ValueError(f"unknown metric {cfg['metric']!r} "
                          f"(one of: {', '.join(sorted(vmaf.METRIC_KEYS))})")
+
+
+def preset_params(data, space, name="preset", log_fn=log) -> dict:
+    """A preset's encode parameters: the completed best result, else the
+    current search point, else encoder defaults (with a warning)."""
+    params = (data.get("best") or {}).get("params")
+    if params:
+        return params
+    current = (data.get("optimizer") or {}).get("current")
+    if current:
+        log_fn(f"note: {name} has no completed best result; "
+               "using current search point")
+        return space.effective(current)
+    log_fn(f"warning: {name} has no optimizer state; using encoder defaults")
+    return space.effective(space.defaults())
 
 
 def parse_freezes(space, cfg_frozen, freeze_args, unfreeze_args) -> dict:
@@ -539,15 +555,7 @@ def cmd_encode(a) -> int:
     validate_config(cfg)
     space = get_space(cfg["encoder"])
 
-    params = (data.get("best") or {}).get("params")
-    if not params:
-        current = (data.get("optimizer") or {}).get("current")
-        if current:
-            params = space.effective(current)
-            log("note: preset has no completed best result; using current search point")
-        else:
-            params = space.effective(space.defaults())
-            log("warning: preset has no optimizer state; using encoder defaults")
+    params = preset_params(data, space, name=data.get("name", "preset"))
 
     if not cfg["target_bitrate_kbps"]:
         raise ValueError("preset has no target bitrate; pass --target-bitrate")
@@ -580,6 +588,121 @@ def cmd_encode(a) -> int:
         f"GOP {result['gop']} @ {result['fps']:g}fps"
         f"{', deinterlaced' if result['deinterlaced'] else ''})")
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# package
+# --------------------------------------------------------------------------- #
+
+def cmd_package(a) -> int:
+    rungs, last_inputs = [], []
+    for name in a.preset:
+        preset_path = presets.resolve(name, a.presets_dir)
+        if not Path(preset_path).exists():
+            raise ValueError(f"preset not found: {preset_path}")
+        data = presets.load(preset_path)
+        stored = data.get("config") or {}
+        cfg = merge_config(stored, {
+            "seg_duration": a.seg_duration,
+            "extra_input_args": shlex.split(a.extra_input_args) if a.extra_input_args else None,
+            "program": a.program,
+        })
+        validate_config(cfg)
+        if not cfg["target_bitrate_kbps"]:
+            raise ValueError(f"preset {data['name']} has no target bitrate")
+        if (a.seg_duration and stored.get("seg_duration")
+                and float(stored["seg_duration"]) != float(a.seg_duration)):
+            log(f"warning: {data['name']}: --seg-duration {a.seg_duration:g} overrides "
+                f"the value its parameters were tuned at ({stored['seg_duration']:g}s)")
+        space = get_space(cfg["encoder"])
+        params = preset_params(data, space, name=data["name"])
+        ff = FF(cfg["ffmpeg"] or "ffmpeg", cfg["ffprobe"] or None)
+        rungs.append(package.Rung(preset_name=data["name"], cfg=cfg, space=space,
+                                  params=params, ff=ff))
+        last_inputs.append(cfg.get("last_input") or "")
+
+    input_url = a.input or next((u for u in last_inputs if u), "")
+    if not input_url:
+        raise ValueError("no input: pass --input FILE|udp://... "
+                         "(or optimize the presets so they remember one)")
+    if not a.input and len({u for u in last_inputs if u}) > 1:
+        log(f"warning: presets disagree on their last input; "
+            f"using {input_url} (pass -i to override)")
+
+    out_dir = Path(a.output_dir)
+    work_dir = out_dir / "_work"
+    ff_mux = FF(a.ffmpeg, a.ffprobe or None) if a.ffmpeg else rungs[0].ff
+    first_cfg = rungs[0].cfg
+
+    if media.is_live_url(input_url):
+        if not a.capture_duration:
+            raise ValueError("live input: pass --capture-duration SECONDS to bound the recording")
+        captured = media.get_or_capture_live(
+            ff_mux, input_url, float(a.capture_duration), work_dir / "capture.ts",
+            first_cfg.get("extra_input_args") or [],
+            program=first_cfg.get("program"), reuse=not a.no_reuse, log=log)
+        src = media.probe_file(ff_mux, captured)
+    else:
+        src = media.probe_file(ff_mux, input_url, program=first_cfg.get("program"))
+
+    rungs.sort(key=lambda r: r.target_kbps)
+    for rung in rungs:
+        package.resolve_output(rung, src)
+    package.assign_names(rungs)
+    if a.h264_level:
+        for rung in rungs:
+            if codec_family(rung.space.codec) == "h264":
+                rung.cfg["extra_video_args"] = list(
+                    rung.cfg.get("extra_video_args") or []) + ["-level", str(a.h264_level)]
+    for warning in package.validate_rungs(rungs):
+        log(f"warning: {warning}")
+
+    log(f"packaging {len(rungs)} rung(s) of {src.path} "
+        f"({src.width}x{src.height} {src.fps:g}fps, "
+        f"audio={'yes' if src.has_audio else 'no'}) -> {a.format}")
+    start = parse_time_seconds(a.start) if a.start else None
+    use_audio = not a.no_audio and src.has_audio
+    inter = package.build_intermediates(
+        rungs, src, work_dir, want_audio=use_audio,
+        audio_kbps=parse_bitrate_kbps(a.audio_bitrate),
+        start=start, duration=a.duration, reuse=not a.no_reuse,
+        ff_audio=ff_mux, log=log)
+
+    seg = float(rungs[0].cfg["seg_duration"])
+    mux, main_output = package.mux_args(
+        a.format, out_dir, inter["video"], [r.name for r in rungs],
+        audio_path=inter["audio"], seg_duration=seg,
+        hls_segment_type=a.hls_segment_type)
+    dur = a.duration or max(0.0, (src.duration or 0.0) - (start or 0.0))
+    log(f"muxing {a.format} package -> {main_output}")
+    ff_mux.run(mux, timeout=package.mux_timeout(dur, len(rungs)))
+
+    if a.format in ("hls", "cmaf"):
+        fixed = package.fixup_master(out_dir / "master.m3u8", fps=rungs[0].fps,
+                                     audio_codec=package.AAC_CODEC if inter["audio"] else None)
+        if fixed:
+            log("master playlist fixup: " + "; ".join(fixed))
+
+    lines, level_warnings = package.stream_report(rungs, inter["video"])
+    log("rungs:")
+    for line in lines:
+        log(line)
+    problems = []
+    if not a.no_verify:
+        problems = package.verify_package(rungs, inter["video"], seg, log=log)
+        if not problems:
+            log("verified: keyframes aligned across all rungs, IDR on segment boundaries")
+    for issue in level_warnings + problems:
+        log(f"warning: {issue}")
+
+    if a.clean:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        log("removed _work/ intermediates (--clean)")
+    else:
+        log(f"intermediates kept in {work_dir} — re-run with another --format "
+            f"to re-package without re-encoding (--clean to remove)")
+    log(f"done: {main_output}")
+    return 1 if problems else 0
 
 
 # --------------------------------------------------------------------------- #
@@ -757,6 +880,49 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--extra-input-args",
                    help="extra ffmpeg input args (live tuning etc.)")
     e.set_defaults(func=cmd_encode)
+
+    pk = sub.add_parser("package",
+                        help="package multiple presets into one ABR HLS/DASH output")
+    pk.add_argument("-p", "--preset", action="append", required=True,
+                    help="ladder rung preset; repeat per rung (order is "
+                         "irrelevant — variants are sorted by bitrate)")
+    pk.add_argument("--presets-dir", default="presets")
+    pk.add_argument("-i", "--input",
+                    help="input file or live url (default: the presets' last input)")
+    pk.add_argument("-o", "--output-dir", required=True)
+    pk.add_argument("--format", choices=("hls", "dash", "cmaf"), default="hls",
+                    help="cmaf = one fMP4 segment set with both manifests")
+    pk.add_argument("--hls-segment-type", choices=("fmp4", "mpegts"), default="fmp4")
+    pk.add_argument("--seg-duration", type=float,
+                    help="override every rung's segment duration (warns: "
+                         "parameters were tuned at the preset's value)")
+    pk.add_argument("--audio-bitrate", default="128k",
+                    help="shared audio rendition bitrate (default 128k)")
+    pk.add_argument("--no-audio", action="store_true")
+    pk.add_argument("--start", help="start position in the input (seconds or HH:MM:SS)")
+    pk.add_argument("--duration", type=float, help="only encode N seconds")
+    pk.add_argument("--capture-duration", "--record-duration",
+                    dest="capture_duration", type=float,
+                    help="live input: seconds to record")
+    pk.add_argument("--program", type=int,
+                    help="MPTS input: transport stream program to capture/probe")
+    pk.add_argument("--h264-level",
+                    help="cap the H.264 level at encode time, e.g. 4.1 (the "
+                         "encoder clamps refs to fit; re-optimizing with "
+                         "--freeze refs=N is the better long-term fix)")
+    pk.add_argument("--no-reuse", action="store_true",
+                    help="re-encode intermediates even when they match")
+    pk.add_argument("--clean", action="store_true",
+                    help="delete _work/ intermediates after a successful package")
+    pk.add_argument("--no-verify", action="store_true",
+                    help="skip the cross-rung keyframe alignment check")
+    pk.add_argument("--ffmpeg",
+                    help="binary for capture/audio/mux steps (default: first "
+                         "rung's; each rung encodes with its own preset's ffmpeg)")
+    pk.add_argument("--ffprobe")
+    pk.add_argument("--extra-input-args",
+                    help="extra ffmpeg input args for live capture")
+    pk.set_defaults(func=cmd_package)
 
     r = sub.add_parser("report", help="summarize a stats .jsonl (writes CSV too)")
     r.add_argument("stats_file")

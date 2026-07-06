@@ -2,7 +2,7 @@
   "pqloop_version": "0.1.0",
   "name": "soccer_1080p50",
   "created": "2026-07-06T07:33:46+0200",
-  "updated": "2026-07-06T08:15:11+0200",
+  "updated": "2026-07-06T08:23:40+0200",
   "config": {
     "encoder": "libx264",
     "target_bitrate_kbps": 6000,
@@ -1068,24 +1068,213 @@
           "objective": 95.6622
         },
         "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 6, \"deblock\": 0, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.0, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 9, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 95.5364,
+        "metrics": {
+          "vmaf_mean": 95.5364,
+          "vmaf_harmonic": 95.4336,
+          "vmaf_min": 64.3447,
+          "vmaf_p1": 87.4547,
+          "vmaf_p5": 90.7945,
+          "vmaf_frames": 3026,
+          "bitrate_kbps": 5516.7,
+          "size_bytes": 41734075,
+          "encode_time_s": 52.74,
+          "encode_fps": 57.4,
+          "over_target_pct": 0.0,
+          "under_target_pct": 8.05,
+          "penalty": 0.0,
+          "objective": 95.5364
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 1, \"bframes\": 6, \"deblock\": 0, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 9, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 95.3354,
+        "metrics": {
+          "vmaf_mean": 95.3354,
+          "vmaf_harmonic": 95.2422,
+          "vmaf_min": 76.4954,
+          "vmaf_p1": 87.7576,
+          "vmaf_p5": 90.6015,
+          "vmaf_frames": 3026,
+          "bitrate_kbps": 5509.0,
+          "size_bytes": 41675406,
+          "encode_time_s": 30.82,
+          "encode_fps": 98.2,
+          "over_target_pct": 0.0,
+          "under_target_pct": 8.18,
+          "penalty": 0.0,
+          "objective": 95.3354
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 8, \"deblock\": 0, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 9, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 95.6447,
+        "metrics": {
+          "vmaf_mean": 95.6447,
+          "vmaf_harmonic": 95.551,
+          "vmaf_min": 66.7493,
+          "vmaf_p1": 87.7761,
+          "vmaf_p5": 91.1375,
+          "vmaf_frames": 3026,
+          "bitrate_kbps": 5551.0,
+          "size_bytes": 41993555,
+          "encode_time_s": 51.51,
+          "encode_fps": 58.8,
+          "over_target_pct": 0.0,
+          "under_target_pct": 7.48,
+          "penalty": 0.0,
+          "objective": 95.6447
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 5, \"deblock\": 0, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 9, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 95.6092,
+        "metrics": {
+          "vmaf_mean": 95.6092,
+          "vmaf_harmonic": 95.5155,
+          "vmaf_min": 66.8812,
+          "vmaf_p1": 87.3676,
+          "vmaf_p5": 91.1035,
+          "vmaf_frames": 3026,
+          "bitrate_kbps": 5538.9,
+          "size_bytes": 41902035,
+          "encode_time_s": 43.36,
+          "encode_fps": 69.8,
+          "over_target_pct": 0.0,
+          "under_target_pct": 7.68,
+          "penalty": 0.0,
+          "objective": 95.6092
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 6, \"deblock\": 0, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 9, \"trellis\": 1, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 95.3056,
+        "metrics": {
+          "vmaf_mean": 95.3056,
+          "vmaf_harmonic": 95.207,
+          "vmaf_min": 62.4712,
+          "vmaf_p1": 87.2082,
+          "vmaf_p5": 90.683,
+          "vmaf_frames": 3026,
+          "bitrate_kbps": 5563.3,
+          "size_bytes": 42086393,
+          "encode_time_s": 53.71,
+          "encode_fps": 56.3,
+          "over_target_pct": 0.0,
+          "under_target_pct": 7.28,
+          "penalty": 0.0,
+          "objective": 95.3056
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 6, \"deblock\": 0, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 10, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 95.6643,
+        "metrics": {
+          "vmaf_mean": 95.6643,
+          "vmaf_harmonic": 95.566,
+          "vmaf_min": 64.6928,
+          "vmaf_p1": 87.5946,
+          "vmaf_p5": 91.1013,
+          "vmaf_frames": 3026,
+          "bitrate_kbps": 5523.8,
+          "size_bytes": 41787915,
+          "encode_time_s": 54.3,
+          "encode_fps": 55.7,
+          "over_target_pct": 0.0,
+          "under_target_pct": 7.94,
+          "penalty": 0.0,
+          "objective": 95.6643
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 6, \"deblock\": 0, \"direct\": \"spatial\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 8, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 95.396,
+        "metrics": {
+          "vmaf_mean": 95.396,
+          "vmaf_harmonic": 95.2906,
+          "vmaf_min": 67.4236,
+          "vmaf_p1": 86.1867,
+          "vmaf_p5": 90.4976,
+          "vmaf_frames": 3026,
+          "bitrate_kbps": 5589.2,
+          "size_bytes": 42282113,
+          "encode_time_s": 33.73,
+          "encode_fps": 89.7,
+          "over_target_pct": 0.0,
+          "under_target_pct": 6.85,
+          "penalty": 0.0,
+          "objective": 95.396
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 6, \"deblock\": 0, \"direct\": \"none\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 9, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 95.507,
+        "metrics": {
+          "vmaf_mean": 95.507,
+          "vmaf_harmonic": 95.4095,
+          "vmaf_min": 66.021,
+          "vmaf_p1": 87.3292,
+          "vmaf_p5": 90.8372,
+          "vmaf_frames": 3026,
+          "bitrate_kbps": 5566.3,
+          "size_bytes": 42109425,
+          "encode_time_s": 52.65,
+          "encode_fps": 57.5,
+          "over_target_pct": 0.0,
+          "under_target_pct": 7.23,
+          "penalty": 0.0,
+          "objective": 95.507
+        },
+        "error": ""
+      },
+      "{\"aq-mode\": 1, \"aq-strength\": 0.5, \"b-adapt\": 2, \"bframes\": 6, \"deblock\": 0, \"direct\": \"auto\", \"me\": \"hex\", \"preset\": \"medium\", \"psy-rd\": 0.3, \"qcomp\": 0.8, \"rc-lookahead\": 40, \"refs\": 3, \"subme\": 9, \"trellis\": 2, \"tune\": \"grain\"}": {
+        "ok": true,
+        "objective": 95.6932,
+        "metrics": {
+          "vmaf_mean": 95.6932,
+          "vmaf_harmonic": 95.5991,
+          "vmaf_min": 63.1685,
+          "vmaf_p1": 88.1493,
+          "vmaf_p5": 91.1191,
+          "vmaf_frames": 3026,
+          "bitrate_kbps": 5537.3,
+          "size_bytes": 41889379,
+          "encode_time_s": 53.11,
+          "encode_fps": 57.0,
+          "over_target_pct": 0.0,
+          "under_target_pct": 7.71,
+          "penalty": 0.0,
+          "objective": 95.6932
+        },
+        "error": ""
       }
     },
     "sens": {
       "preset": 0.0001,
-      "psy-rd": 0.2105,
+      "psy-rd": 0.1052,
       "aq-mode": 0.0,
-      "subme": 0.0739,
+      "subme": 0.0369,
       "aq-strength": 0.2243,
       "rc-lookahead": 0.0,
-      "bframes": 0.1359,
+      "bframes": 0.0679,
       "qcomp": 0.1177,
       "refs": 0.0025,
       "me": 0.0,
-      "trellis": 0.1054,
+      "trellis": 0.0527,
       "deblock": 0.0,
       "merange": 0.0,
-      "b-adapt": 0.1686,
-      "direct": 0.007,
+      "b-adapt": 0.0843,
+      "direct": 0.0035,
       "tune": 0.1634
     },
     "best": {
@@ -1125,8 +1314,8 @@
       }
     },
     "screened": true,
-    "passes_done": 1,
-    "encodes": 48
+    "passes_done": 2,
+    "encodes": 57
   },
   "best": {
     "params": {
@@ -1164,6 +1353,18 @@
       "objective": 95.6992
     }
   },
-  "runs": [],
+  "runs": [
+    {
+      "run_id": "20260706-073351_soccer_1080p50",
+      "started": "2026-07-06T07:33:51+0200",
+      "ended": "2026-07-06T08:23:40+0200",
+      "input": "input/France_vs_Croatia_WCFinal2018.ts",
+      "clip_start": 4538.0,
+      "clip_duration": 60.0,
+      "encodes": 57,
+      "stop_reason": "diminishing_returns",
+      "elapsed_s": 2988.4
+    }
+  ],
   "objective_key": "{\"bitrate_tolerance\": 0.05, \"bufsize_ratio\": 2.0, \"encoder\": \"libx264\", \"extra_video_args\": [], \"maxrate_ratio\": 1.1, \"metric\": \"mean\", \"overshoot_penalty\": 1.0, \"pix_fmt\": \"yuv420p\", \"scale\": \"\", \"seg_duration\": 4.0, \"target_bitrate_kbps\": 6000, \"two_pass\": false, \"undershoot_penalty\": 0.0, \"vmaf_model\": \"\", \"vmaf_subsample\": 1}"
 }

@@ -63,6 +63,38 @@ class FF:
                               cmd, _stderr_tail(cp.stderr))
         return json.loads(cp.stdout or "{}")
 
+    def probe_entries(self, url, section, entries, select=None,
+                      read_intervals=None, timeout=600) -> list:
+        """Stream per-packet/per-frame fields as a list of dicts (compact
+        key=value output, so field order never matters). Used for keyframe
+        alignment checks: packet=pts_time,flags over a whole VOD file is
+        demux-only and fast; frame-level probes decode, so bound them with
+        read_intervals."""
+        cmd = [self.ffprobe, "-v", "error"]
+        if select:
+            cmd += ["-select_streams", select]
+        if read_intervals:
+            cmd += ["-read_intervals", read_intervals]
+        cmd += ["-show_entries", f"{section}={entries}",
+                "-of", "compact=p=0:nk=0", str(url)]
+        try:
+            cp = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, timeout=timeout)
+        except FileNotFoundError:
+            raise FFmpegError(f"ffprobe binary not found: {self.ffprobe}", cmd)
+        except subprocess.TimeoutExpired:
+            raise FFmpegError(f"ffprobe timed out after {timeout}s probing {url}", cmd)
+        if cp.returncode != 0:
+            raise FFmpegError(f"ffprobe failed on {url}: {_stderr_tail(cp.stderr, 500)}",
+                              cmd, _stderr_tail(cp.stderr))
+        rows = []
+        for line in cp.stdout.splitlines():
+            if not line.strip():
+                continue
+            rows.append(dict(part.partition("=")[::2] for part in line.split("|")
+                             if "=" in part))
+        return rows
+
     def _capability_list(self, kind) -> str:
         if kind not in self._caps:
             cp = subprocess.run([self.ffmpeg, "-hide_banner", f"-{kind}"],

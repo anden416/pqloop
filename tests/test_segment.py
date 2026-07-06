@@ -78,6 +78,16 @@ class Mp4Test(unittest.TestCase):
         self.assertNotIn("frag_keyframe", movflags)
         self.assertTrue(args[-1].endswith("output.mp4"))
 
+    def test_intermediates_can_skip_faststart(self):
+        # ABR packaging encodes local intermediates where the faststart
+        # whole-file rewrite buys nothing
+        args, _, _ = segment.build_encode_args(
+            get_space("libx264"), get_space("libx264").defaults(),
+            {"target_bitrate_kbps": 3000}, _source(), "out", fmt="mp4",
+            want_audio=False, faststart=False)
+        self.assertNotIn("-movflags", args)
+        self.assertIn("-an", args)
+
     def test_unknown_format_raises(self):
         with self.assertRaises(ValueError):
             _encode("libx264", "webm")
