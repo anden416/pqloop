@@ -51,7 +51,7 @@ python3 -m pqloop optimize -i input/match.ts -p sports -b 6000k \
 # trials replay for free, and the search continues where it stopped
 python3 -m pqloop optimize -p sports
 
-# see what the baseline command would be without encoding anything
+# see the baseline command(s) without encoding anything
 python3 -m pqloop optimize -p sports --dry-run
 
 # produce packager-ready fMP4 HLS segments with the tuned parameters
@@ -87,7 +87,8 @@ python3 -m pqloop optimize -i input/match.ts -p sports_720p -b 2800k \
 # protect worst-case frames instead of the average (see "Choosing a metric")
 python3 -m pqloop optimize -p sports --metric p5
 
-# two-pass rate control (libx264 and libx265) — typically lands on target
+# two-pass rate control (libx264 and libx265) — trials and final/package
+# encodes all use the same two passes
 python3 -m pqloop optimize -p sports --two-pass
 ```
 
@@ -267,7 +268,12 @@ Not random, and not exhaustive:
 Every evaluated configuration is cached in the preset by its *effective*
 parameter signature (inert knobs stripped — `merange` doesn't count while
 `me=hex`), so nothing is ever encoded twice. That cache is also what makes
-resume free and deterministic.
+resume free and deterministic. Cache provenance includes the encoder and VMAF
+FFmpeg/ffprobe builds plus a versioned encoder-space definition. Upgrading from
+an older preset therefore re-scores once while keeping its best-known parameters
+and sensitivity order as priors. `--reset-cache` requests the same safe rescore;
+`--cache-salt TEXT` records a driver, firmware, or dynamic-encoder identifier
+for changes that do not appear in `ffmpeg -version`.
 
 **The objective** is the chosen VMAF aggregate (`--metric`) minus a penalty
 when the measured bitrate overshoots the target beyond tolerance
@@ -438,7 +444,8 @@ python3 -m pqloop optimize -p sports --tune-params preset,aq-mode,psy-rd
 python3 -m pqloop optimize -p sports --exclude-params tune
 
 # pin a value and keep it out of the search (see the psy caveat below);
-# --unfreeze psy-rd reverses it. Freezes are remembered by the preset.
+# --unfreeze psy-rd reverses it. Freezes are remembered by the preset and
+# must use one of the curated values shown by the encoder's parameter space.
 python3 -m pqloop optimize -p sports --freeze psy-rd=1.0
 
 # skip screening (e.g. when resuming with known sensitivities)
@@ -463,12 +470,19 @@ ordering carried over as priors — whenever they'd no longer be comparable:
   settings), or
 - the objective changed (encoder, target bitrate, VBV ratios, tolerance or
   penalties, metric, scale, pix_fmt, seg duration, GOP duration, two-pass, VMAF
-  model or subsampling, extra video args).
+  model or subsampling, extra video args), or
+- the encode/measurement toolchain or encoder-space cache schema changed.
+
+Only successful results compatible with the preset's active `--freeze`
+constraints may become `best`; changing a freeze reselects the best eligible
+cached result instead of accidentally shipping an older incompatible winner.
+Mutating commands take fail-fast preset/work/output locks, so concurrent runs
+cannot overwrite one another's state.
 
 Presets travel between servers: the tuned parameters are plain encoder
-settings and transfer as-is. The trial cache is tied to the mezzanine
-fingerprint, so on a new machine the reference is rebuilt and scores
-re-measure from the carried-over priors.
+settings and transfer as-is. Scores remain reusable only when the rebuilt
+mezzanine fingerprint and encode/measurement tool identities still match;
+otherwise they are safely re-measured from the carried-over priors.
 
 ## Statistics
 
@@ -480,6 +494,9 @@ record — plus a flattened CSV next to it for spreadsheets/pandas. Every
 record carries the `run_id`, so rows from many runs and many servers combine
 without losing which machine produced what (column sets vary per encoder, so
 merge with something union-aware rather than shell-concatenating):
+
+Trial metrics separately record encode, probe, VMAF, and total wall time, which
+makes it clear whether a run is encoder- or measurement-bound.
 
 ```bash
 python3 -m pqloop report stats/20260705-161125_sports.jsonl   # summary + CSV
@@ -517,7 +534,10 @@ python3 -m pqloop encode -p sports -i input/match.ts -o output/sports_fmp4 \
 ```
 
 HEVC output in mp4/fMP4 is tagged `hvc1` (Apple players reject the ffmpeg
-default `hev1`). Audio is re-encoded to stereo AAC (`--audio-bitrate`,
+default `hev1`). Direct and multi-rung manifests receive the same strict
+post-processing: complete HEVC RFC 6381 codec strings, measured peak/average
+bandwidth, audio bandwidth, frame rate, and independent-segment signaling.
+Audio is re-encoded to stereo AAC (`--audio-bitrate`,
 default 128k; `--no-audio` drops it). Live inputs record first
 (`--capture-duration` bounds the recording; `--program` selects from an MPTS):
 
@@ -539,11 +559,14 @@ and let the rest of the space do the work. Golden-eye check the
 
 ```bash
 python3 -m unittest discover -s tests            # full suite, no ffmpeg needed
-python3 -m unittest tests.test_optimizer         # one module
+python3 -m unittest tests.test_core              # core unit tests
+PQLOOP_FFMPEG_INTEGRATION=1 python3 -m unittest \
+    tests.test_integration_ffmpeg -v              # real x264/x265/CMAF smoke
 ```
 
-Tests are hermetic (fake ffmpeg wrappers, no encoding) and run in CI on
-Python 3.9 and 3.12 (`.github/workflows/ci.yml`).
+The default unit suite is hermetic (fake ffmpeg wrappers, no encoding) and runs
+in CI on Python 3.9 and 3.12. A separate CI job installs ffmpeg and exercises
+real x264/x265 two-pass and CMAF output (`.github/workflows/ci.yml`).
 
 ```
 pqloop/            the package (stdlib only)

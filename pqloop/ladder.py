@@ -195,12 +195,15 @@ def optimize_argv(rung, a, input_url, work_root, live=False) -> list:
     argv += _opt("--ffmpeg", a.ffmpeg)
     argv += _opt("--ffprobe", a.ffprobe)
     argv += _opt("--vmaf-ffmpeg", a.vmaf_ffmpeg)
+    argv += _opt("--cache-salt", getattr(a, "cache_salt", None))
     argv += _opt("--extra-video-args", a.extra_video_args)
     argv += _opt("--extra-input-args", a.extra_input_args)
     argv += _tristate("--two-pass", a.two_pass)
     argv += _tristate("--keep-trials", a.keep_trials)
     if a.no_screen:
         argv += ["--no-screen"]
+    if getattr(a, "reset_cache", False):
+        argv += ["--reset-cache"]
     for item in a.freeze or []:
         argv += ["--freeze", item]
     if a.optimize_args:

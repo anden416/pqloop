@@ -28,6 +28,25 @@ from dataclasses import dataclass, field
 NEG_INF = float("-inf")
 
 
+def respects_frozen(space, params, frozen) -> bool:
+    """Whether an effective parameter set satisfies all active constraints.
+
+    Dependent parameters are only constraints while active.  For example,
+    freezing ``merange`` must not disqualify a configuration whose motion
+    estimation mode makes ``merange`` inert.
+    """
+    if not frozen:
+        return True
+    full = space.defaults()
+    full.update(params or {})
+    for name, value in frozen.items():
+        if name not in space.params:
+            return False
+        if space.active(full, name) and full.get(name) != value:
+            return False
+    return True
+
+
 @dataclass
 class TrialOutcome:
     ok: bool
@@ -85,10 +104,31 @@ class Optimizer:
                       for k, v in (st.get("cache") or {}).items()}
         self.sens = {k: float(v) for k, v in (st.get("sens") or {}).items()}
         best = st.get("best") or {}
-        self.best_params = best.get("params")
-        self.best_objective = best.get("objective")
-        self.best_objective = NEG_INF if self.best_objective is None else float(self.best_objective)
-        self.best_metrics = best.get("metrics") or {}
+        self.best_params = None
+        self.best_objective = NEG_INF
+        self.best_metrics = {}
+        if (best.get("params") is not None
+                and respects_frozen(space, best.get("params"), self.frozen)):
+            objective = best.get("objective")
+            if objective is not None:
+                self.best_params = dict(best["params"])
+                self.best_objective = float(objective)
+                self.best_metrics = dict(best.get("metrics") or {})
+        # A changed freeze can make the persisted best ineligible while an
+        # older eligible result is still available in the successful cache.
+        # Rehydrate the best constrained result without spending another encode.
+        for sig, outcome in self.cache.items():
+            if not outcome.ok or outcome.objective <= self.best_objective:
+                continue
+            try:
+                cached_params = json.loads(sig)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if (isinstance(cached_params, dict)
+                    and respects_frozen(space, cached_params, self.frozen)):
+                self.best_params = cached_params
+                self.best_objective = outcome.objective
+                self.best_metrics = dict(outcome.metrics)
         self.screened = bool(st.get("screened"))
         self.passes_done = int(st.get("passes_done") or 0)
         self.total_encodes = int(st.get("encodes") or 0)

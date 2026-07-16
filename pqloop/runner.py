@@ -14,7 +14,7 @@ from .encoders import RateControl
 from .ffmpeg import FFmpegError
 from .optimizer import TrialOutcome, NEG_INF
 from . import vmaf
-from .util import atomic_write_json
+from .util import atomic_write_json, load_json
 
 
 @dataclass
@@ -45,7 +45,7 @@ class RunConfig:
 
 class TrialRunner:
     def __init__(self, cfg: RunConfig, ff_enc, ff_meas, space, mezz,
-                 workdir, log=None):
+                 workdir, log=None, best_objective=NEG_INF):
         self.cfg = cfg
         self.ff_enc = ff_enc
         self.ff_meas = ff_meas
@@ -61,7 +61,10 @@ class TrialRunner:
             found = [re.match(r"t(\d+)\.", p.name)
                      for p in self.trials_dir.iterdir()]
             self.counter = max((int(m.group(1)) for m in found if m), default=0)
-        self.best_objective = NEG_INF
+        # Seeded from the optimizer's persisted, constraint-eligible best on a
+        # resume. Otherwise the first new (possibly inferior) trial would
+        # overwrite best_trial.* merely because it is new to this process.
+        self.best_objective = best_objective
         self.rc = RateControl(
             bitrate_kbps=int(cfg.target_bitrate_kbps),
             maxrate_kbps=int(round(cfg.target_bitrate_kbps * cfg.maxrate_ratio)),
@@ -81,15 +84,11 @@ class TrialRunner:
         if self.cfg.scale:
             w, h = self.cfg.scale.lower().split("x", 1)
             args += ["-vf", f"scale={int(w)}:{int(h)}:flags=lanczos"]
-        extra_kv = None
-        if pass_num and self._two_pass == "kv":
-            extra_kv = {"pass": pass_num, "stats": str(passlog)}
         args += self.space.video_args(params, gop_len=self.gop_len,
                                       seg_duration=self.cfg.seg_duration,
-                                      rc=self.rc, extra_kv=extra_kv)
+                                      rc=self.rc, pass_num=pass_num,
+                                      passlog=passlog)
         args += ["-pix_fmt", self.cfg.pix_fmt]
-        if pass_num and self._two_pass == "flags":
-            args += ["-pass", str(pass_num), "-passlogfile", str(passlog)]
         args += list(self.cfg.extra_video_args)
         args += ["-an", "-sn", "-dn"]
         if pass_num == 1:
@@ -122,18 +121,22 @@ class TrialRunner:
                                 timeout=encode_timeout)
             encode_time = time.monotonic() - started
 
+            probe_started = time.monotonic()
             probe = self.ff_enc.probe(out_path)
             fmt = probe.get("format", {})
             size = int(fmt.get("size") or out_path.stat().st_size)
             duration = float(fmt.get("duration") or self.mezz.duration or 1.0)
             bitrate_kbps = size * 8.0 / duration / 1000.0
+            probe_time = time.monotonic() - probe_started
 
+            vmaf_started = time.monotonic()
             scores = vmaf.measure(
                 self.ff_meas, str(out_path), self.mezz.path,
                 self.mezz.width, self.mezz.height, str(vmaf_log),
                 threads=self.cfg.vmaf_threads, subsample=self.cfg.vmaf_subsample,
                 model=self.cfg.vmaf_model or None,
                 timeout=max(900.0, self.mezz.duration * 60 + 300))
+            vmaf_time = time.monotonic() - vmaf_started
 
             raw = scores[self.cfg.metric_key]
             target = float(self.cfg.target_bitrate_kbps)
@@ -149,6 +152,9 @@ class TrialRunner:
                 "bitrate_kbps": round(bitrate_kbps, 1),
                 "size_bytes": size,
                 "encode_time_s": round(encode_time, 2),
+                "probe_time_s": round(probe_time, 3),
+                "vmaf_time_s": round(vmaf_time, 2),
+                "trial_time_s": round(time.monotonic() - started, 2),
                 "encode_fps": round((self.mezz.duration * self.mezz.fps) / encode_time, 1)
                               if encode_time > 0 else 0.0,
                 "over_target_pct": round(over_pct, 2),
@@ -167,6 +173,29 @@ class TrialRunner:
 
     # ---- housekeeping ------------------------------------------------------------
 
+    def reconcile_best_artifacts(self, params, objective) -> None:
+        """Remove a stale visual-inspection artifact after constraints/reset."""
+        paths = [self.workdir / "best_trial.mp4",
+                 self.workdir / "best_trial.vmaf.json",
+                 self.workdir / "best_trial.json"]
+        if not any(p.exists() for p in paths):
+            return
+        matches = False
+        try:
+            meta = load_json(paths[-1])
+            recorded_obj = meta.get("objective")
+            if recorded_obj is None:
+                recorded_obj = (meta.get("metrics") or {}).get("objective")
+            matches = (params is not None and meta.get("params") == params
+                       and recorded_obj is not None
+                       and abs(float(recorded_obj) - float(objective)) < 1e-6)
+        except (OSError, ValueError, TypeError):
+            matches = False
+        if not matches:
+            self._cleanup(*paths)
+            self.log("note: removed stale best_trial artifacts; the next "
+                     "improving real trial will recreate them")
+
     def _retain_or_drop(self, out_path, vmaf_log, params, outcome):
         if outcome.objective > self.best_objective:
             self.best_objective = outcome.objective
@@ -178,7 +207,8 @@ class TrialRunner:
                 shutil.copy2(vmaf_log, best_log) if self.cfg.keep_trials \
                     else vmaf_log.replace(best_log)
                 atomic_write_json(self.workdir / "best_trial.json",
-                                  {"params": params, "metrics": outcome.metrics})
+                                  {"params": params, "objective": outcome.objective,
+                                   "metrics": outcome.metrics})
             except OSError:
                 pass
         if not self.cfg.keep_trials:

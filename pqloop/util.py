@@ -6,8 +6,11 @@ import hashlib
 import json
 import os
 import re
+import socket
 import tempfile
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -16,7 +19,58 @@ def now_iso() -> str:
 
 
 def run_stamp() -> str:
-    return time.strftime("%Y%m%d-%H%M%S")
+    # Seconds alone collide when two runs of one preset start together.
+    fraction = time.time_ns() % 1_000_000_000
+    return (f"{time.strftime('%Y%m%d-%H%M%S')}-{fraction:09d}-"
+            f"{os.getpid()}-{uuid.uuid4().hex[:8]}")
+
+
+@contextmanager
+def advisory_lock(path, label="resource"):
+    """Hold a fail-fast cross-process lock without deleting its stable inode."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(p, "a+", encoding="utf-8")
+    locked = False
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0)
+                if not fh.read(1):
+                    fh.seek(0)
+                    fh.write(" ")
+                    fh.flush()
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except (BlockingIOError, OSError):
+            fh.seek(0)
+            owner = fh.read().strip()
+            detail = f" ({owner})" if owner else ""
+            raise RuntimeError(f"{label} is already in use{detail}")
+        fh.seek(0)
+        fh.truncate()
+        fh.write(json.dumps({"pid": os.getpid(), "host": socket.gethostname(),
+                             "started": now_iso()}))
+        fh.flush()
+        yield p
+    finally:
+        if locked:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        fh.close()
 
 
 def parse_bitrate_kbps(text) -> int:
@@ -83,6 +137,28 @@ def atomic_write_json(path, obj) -> None:
         with os.fdopen(fd, "w") as fh:
             json.dump(obj, fh, indent=2, sort_keys=False)
             fh.write("\n")
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_write_text(path, text) -> None:
+    """Atomically replace a UTF-8 text file in the same directory."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = p.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(str(text))
+        os.chmod(tmp, mode)
         os.replace(tmp, p)
     except BaseException:
         try:

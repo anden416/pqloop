@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from .encoders import RateControl, codec_family
 from . import media
 
 
+@dataclass
+class EncodePlan:
+    """One logical encode, represented by one or two ffmpeg commands."""
+
+    commands: list
+    main_output: Path
+    meta: dict
+    passlog: Path = None
+
+
 def build_encode_args(space, params, cfg, source, out_dir, fmt="hls",
                       hls_segment_type="fmp4", audio_kbps=128, want_audio=True,
-                      start=None, duration=None, faststart=True):
+                      start=None, duration=None, faststart=True,
+                      pass_num=0, passlog=None):
     """Build the deliverable-encode command without running it. Returns
     (args, main_output, meta); meta carries what final_encode needs for
     logging/running and what package.py records in intermediate sidecars."""
@@ -47,17 +59,20 @@ def build_encode_args(space, params, cfg, source, out_dir, fmt="hls",
     if duration:
         args += ["-t", f"{float(duration):.3f}"]
     args += source.video_map()
-    use_audio = want_audio and source.has_audio
+    # Pass one only analyzes video. Audio is encoded/muxed exactly once in the
+    # final pass, matching TrialRunner's two-pass behavior.
+    use_audio = pass_num != 1 and want_audio and source.has_audio
     if use_audio:
         args += source.audio_map()
     if filters:
         args += ["-vf", ",".join(filters)]
     if deinterlaced:
         args += ["-r", fps_str]
-    args += space.video_args(params, gop_len=gop_len, seg_duration=seg, rc=rc)
+    args += space.video_args(params, gop_len=gop_len, seg_duration=seg, rc=rc,
+                             pass_num=pass_num, passlog=passlog)
     # Apple players require the hvc1 sample entry for HEVC in mp4/fMP4
     # (ffmpeg defaults to hev1); mpegts segments carry no such tag.
-    if codec_family(space.codec) == "hevc" and (
+    if pass_num != 1 and codec_family(space.codec) == "hevc" and (
             fmt in ("mp4", "fmp4", "dash", "cmaf")
             or (fmt == "hls" and hls_segment_type == "fmp4")):
         args += ["-tag:v", "hvc1"]
@@ -73,7 +88,10 @@ def build_encode_args(space, params, cfg, source, out_dir, fmt="hls",
     else:
         args += ["-an"]
 
-    if fmt == "hls":
+    if pass_num == 1:
+        args += ["-sn", "-dn", "-f", "null", "-"]
+        main_output = Path("-")
+    elif fmt == "hls":
         playlist = out_dir / "index.m3u8"
         args += ["-f", "hls", "-hls_time", f"{seg:g}",
                  "-hls_playlist_type", "vod",
@@ -127,6 +145,57 @@ def build_encode_args(space, params, cfg, source, out_dir, fmt="hls",
     return args, main_output, meta
 
 
+def build_encode_plan(space, params, cfg, source, out_dir, fmt="hls",
+                      hls_segment_type="fmp4", audio_kbps=128, want_audio=True,
+                      start=None, duration=None, faststart=True,
+                      passlog=None) -> EncodePlan:
+    """Build the complete command plan for a final/intermediate encode."""
+    out_dir = Path(out_dir)
+    requested = bool(cfg_get(cfg, "two_pass", False))
+    two_pass = requested and bool(space.two_pass)
+    passlog = Path(passlog) if passlog else out_dir / ".pqloop-passlog"
+    final_pass = 2 if two_pass else 0
+    final_args, main_output, meta = build_encode_args(
+        space, params, cfg, source, out_dir, fmt=fmt,
+        hls_segment_type=hls_segment_type, audio_kbps=audio_kbps,
+        want_audio=want_audio, start=start, duration=duration,
+        faststart=faststart, pass_num=final_pass,
+        passlog=passlog if two_pass else None)
+    commands = []
+    if two_pass:
+        first_args, _, _ = build_encode_args(
+            space, params, cfg, source, out_dir, fmt=fmt,
+            hls_segment_type=hls_segment_type, audio_kbps=audio_kbps,
+            want_audio=False, start=start, duration=duration,
+            faststart=faststart, pass_num=1, passlog=passlog)
+        commands.append(first_args)
+    commands.append(final_args)
+    meta.update({"passes": len(commands), "two_pass": two_pass,
+                 "two_pass_requested": requested})
+    return EncodePlan(commands=commands, main_output=Path(main_output), meta=meta,
+                      passlog=passlog if two_pass else None)
+
+
+def cleanup_passlog(passlog) -> None:
+    if not passlog:
+        return
+    path = Path(passlog)
+    for leftover in path.parent.glob(path.name + "*"):
+        try:
+            leftover.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def run_encode_plan(ff, plan: EncodePlan) -> None:
+    """Execute an EncodePlan and always remove two-pass scratch files."""
+    try:
+        for args in plan.commands:
+            ff.run(args, timeout=plan.meta["timeout"])
+    finally:
+        cleanup_passlog(plan.passlog)
+
+
 def final_encode(ff, space, params, cfg, source, out_dir, fmt="hls",
                  hls_segment_type="fmp4", audio_kbps=128, want_audio=True,
                  start=None, duration=None, log=None) -> dict:
@@ -136,21 +205,25 @@ def final_encode(ff, space, params, cfg, source, out_dir, fmt="hls",
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     log = log or (lambda m: None)
-    args, main_output, meta = build_encode_args(
+    plan = build_encode_plan(
         space, params, cfg, source, out_dir, fmt=fmt,
         hls_segment_type=hls_segment_type, audio_kbps=audio_kbps,
         want_audio=want_audio, start=start, duration=duration)
+    main_output, meta = plan.main_output, plan.meta
     gop_len, fps = meta["gop"], meta["fps"]
+    if meta["two_pass_requested"] and not meta["two_pass"]:
+        log(f"note: --two-pass not supported for {space.name}; using single pass")
     log(f"encoding deliverable -> {main_output} "
         f"({'deinterlaced ' if meta['deinterlaced'] else ''}{fmt}, "
         f"{meta['target']}k, GOP {gop_len} @ {fps:g}fps, seg {meta['seg']:g}s)")
-    ff.run(args, timeout=meta["timeout"])
+    run_encode_plan(ff, plan)
 
     segments = sorted([p.name for p in out_dir.iterdir()
                        if p.suffix in (".m4s", ".ts", ".mp4", ".m4a")
                        and p.name != "output.mp4"])
     return {"output": str(main_output), "segments": len(segments),
-            "gop": gop_len, "fps": fps, "deinterlaced": meta["deinterlaced"]}
+            "gop": gop_len, "fps": fps, "deinterlaced": meta["deinterlaced"],
+            "passes": meta["passes"]}
 
 
 def cfg_get(cfg, key, default=None):

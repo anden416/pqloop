@@ -3,8 +3,54 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import shutil
 import subprocess
+import time
 from pathlib import Path
+
+
+_TOOL_IDENTITY_CACHE = {}
+
+
+def _tool_identity(binary) -> dict:
+    """Stable, path-independent identity for an ffmpeg-family executable."""
+    named = str(binary)
+    resolved = shutil.which(named) or named
+    path = Path(resolved)
+    try:
+        real = path.resolve(strict=True)
+        stat = real.stat()
+        cache_key = (str(real), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        real = path
+        cache_key = (str(path), None, None)
+    if cache_key in _TOOL_IDENTITY_CACHE:
+        return dict(_TOOL_IDENTITY_CACHE[cache_key])
+
+    try:
+        cp = subprocess.run([str(real), "-version"], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, timeout=30)
+        version_output = cp.stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        version_output = "unavailable"
+    digest = hashlib.sha256()
+    digest.update(version_output.encode("utf-8", "replace"))
+    try:
+        with open(real, "rb") as fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError:
+        # Named PATH tools and unusual wrappers can be unhashable; their full
+        # version banner still differentiates normal build changes.
+        pass
+    first = version_output.splitlines()[0] if version_output.splitlines() else "unknown"
+    identity = {"version": first, "sha256": digest.hexdigest()}
+    _TOOL_IDENTITY_CACHE[cache_key] = identity
+    return dict(identity)
 
 
 class FFmpegError(RuntimeError):
@@ -70,6 +116,13 @@ class FF:
         alignment checks: packet=pts_time,flags over a whole VOD file is
         demux-only and fast; frame-level probes decode, so bound them with
         read_intervals."""
+        return list(self.iter_probe_entries(
+            url, section, entries, select=select,
+            read_intervals=read_intervals, timeout=timeout))
+
+    def iter_probe_entries(self, url, section, entries, select=None,
+                           read_intervals=None, timeout=600):
+        """Yield compact ffprobe rows without buffering a whole VOD in RAM."""
         cmd = [self.ffprobe, "-v", "error"]
         if select:
             cmd += ["-select_streams", select]
@@ -78,22 +131,40 @@ class FF:
         cmd += ["-show_entries", f"{section}={entries}",
                 "-of", "compact=p=0:nk=0", str(url)]
         try:
-            cp = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, timeout=timeout)
+            cp = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, bufsize=1)
         except FileNotFoundError:
             raise FFmpegError(f"ffprobe binary not found: {self.ffprobe}", cmd)
+        started = time.monotonic()
+        try:
+            for line in cp.stdout:
+                if timeout and time.monotonic() - started > timeout:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+                line = line.strip()
+                if not line:
+                    continue
+                yield dict(part.partition("=")[::2] for part in line.split("|")
+                           if "=" in part)
+            remaining = None if not timeout else max(
+                0.01, timeout - (time.monotonic() - started))
+            rc = cp.wait(timeout=remaining)
+            stderr = cp.stderr.read()
         except subprocess.TimeoutExpired:
-            raise FFmpegError(f"ffprobe timed out after {timeout}s probing {url}", cmd)
-        if cp.returncode != 0:
-            raise FFmpegError(f"ffprobe failed on {url}: {_stderr_tail(cp.stderr, 500)}",
-                              cmd, _stderr_tail(cp.stderr))
-        rows = []
-        for line in cp.stdout.splitlines():
-            if not line.strip():
-                continue
-            rows.append(dict(part.partition("=")[::2] for part in line.split("|")
-                             if "=" in part))
-        return rows
+            cp.kill()
+            cp.wait()
+            raise FFmpegError(
+                f"ffprobe timed out after {timeout}s probing {url}", cmd)
+        finally:
+            if cp.poll() is None:
+                cp.kill()
+                cp.wait()
+            if cp.stdout:
+                cp.stdout.close()
+            if cp.stderr:
+                cp.stderr.close()
+        if rc != 0:
+            raise FFmpegError(f"ffprobe failed on {url}: {_stderr_tail(stderr, 500)}",
+                              cmd, _stderr_tail(stderr))
 
     def _capability_list(self, kind) -> str:
         if kind not in self._caps:
@@ -119,6 +190,14 @@ class FF:
         except (OSError, subprocess.SubprocessError):
             return False
 
+    def has_muxer(self, name) -> bool:
+        try:
+            return any(line.split()[1] == name
+                       for line in self._capability_list("muxers").splitlines()
+                       if len(line.split()) > 1)
+        except (OSError, subprocess.SubprocessError):
+            return False
+
     def version(self) -> str:
         try:
             cp = subprocess.run([self.ffmpeg, "-version"], stdout=subprocess.PIPE,
@@ -126,3 +205,8 @@ class FF:
             return (cp.stdout or "").splitlines()[0] if cp.stdout else "unknown"
         except (OSError, subprocess.SubprocessError, IndexError):
             return "unknown"
+
+    def identity(self) -> dict:
+        """Build identities used to namespace persisted trial scores."""
+        return {"ffmpeg": _tool_identity(self.ffmpeg),
+                "ffprobe": _tool_identity(self.ffprobe)}

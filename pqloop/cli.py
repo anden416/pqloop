@@ -11,7 +11,9 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import re
 import shlex
 import shutil
@@ -25,11 +27,11 @@ from . import (__version__, ladder as ladder_mod, media, package, presets,
                stats as stats_mod, vmaf)
 from .encoders import codec_family, get_space, known_encoders
 from .ffmpeg import FF, FFmpegError
-from .optimizer import Optimizer, Settings, NEG_INF
+from .optimizer import Optimizer, Settings, NEG_INF, respects_frozen
 from .runner import RunConfig, TrialRunner
 from .segment import final_encode
 from .util import (parse_bitrate_kbps, parse_time_seconds, coerce_value,
-                   run_stamp, now_iso)
+                   run_stamp, now_iso, advisory_lock)
 
 CONFIG_DEFAULTS = {
     "encoder": "libx264",
@@ -66,6 +68,7 @@ CONFIG_DEFAULTS = {
     "ffmpeg": "ffmpeg",
     "ffprobe": "",
     "vmaf_ffmpeg": "",
+    "cache_salt": "",
     "frozen": {},
     "tune_params": [],
     "exclude_params": [],
@@ -79,6 +82,10 @@ CONFIG_DEFAULTS = {
 
 def log(msg=""):
     print(msg, flush=True)
+
+
+def _lock_path(path) -> Path:
+    return Path(str(path) + ".pqloop.lock")
 
 
 # --------------------------------------------------------------------------- #
@@ -108,11 +115,30 @@ def merge_config(preset_cfg: dict, cli: dict) -> dict:
 def validate_config(cfg) -> None:
     """Fail fast on malformed values — before any capture, mezzanine build, or
     encode has spent time (some of these are otherwise parsed mid-trial)."""
+    for key in ("clip_duration", "seg_duration", "gop_duration", "clip_start",
+                "capture_duration", "maxrate_ratio", "bufsize_ratio",
+                "bitrate_tolerance", "overshoot_penalty", "undershoot_penalty",
+                "min_gain", "adopt_eps"):
+        value = cfg.get(key)
+        if value is not None and not math.isfinite(float(value)):
+            raise ValueError(f"{key} must be finite (got {value!r})")
     scale = cfg.get("scale")
     if scale:
         w, x, h = str(scale).lower().partition("x")
         if x != "x" or not (w.isdigit() and h.isdigit() and int(w) and int(h)):
             raise ValueError(f"scale must be WxH, e.g. 1280x720 (got {scale!r})")
+        pix_fmt = str(cfg.get("pix_fmt") or "").lower()
+        subsampled_420 = ("420" in pix_fmt
+                          or pix_fmt.startswith(("nv12", "nv21", "p010",
+                                                "p012", "p016")))
+        subsampled_422 = ("422" in pix_fmt
+                          or pix_fmt.startswith(("nv16", "p210", "p212",
+                                                "p216")))
+        if ((subsampled_420 and (int(w) % 2 or int(h) % 2))
+                or (subsampled_422 and int(w) % 2)):
+            raise ValueError(
+                f"scale dimensions are incompatible with {pix_fmt} chroma "
+                f"subsampling (got {scale!r})")
     norm_scale = cfg.get("norm_scale")
     if norm_scale:
         w, x, h = str(norm_scale).lower().partition("x")
@@ -136,9 +162,34 @@ def validate_config(cfg) -> None:
     audio_stream = cfg.get("audio_stream")
     if audio_stream is not None and int(audio_stream) < 0:
         raise ValueError(f"audio_stream must be >= 0 (got {audio_stream!r})")
-    for key in ("clip_duration", "seg_duration", "maxrate_ratio", "bufsize_ratio"):
+    for key in ("clip_duration", "seg_duration", "bufsize_ratio"):
         if float(cfg[key]) <= 0:
             raise ValueError(f"{key} must be > 0 (got {cfg[key]!r})")
+    if float(cfg["maxrate_ratio"]) < 1.0:
+        raise ValueError(
+            f"maxrate_ratio must be >= 1 (got {cfg['maxrate_ratio']!r})")
+    if cfg.get("target_bitrate_kbps") is not None \
+            and int(cfg["target_bitrate_kbps"]) <= 0:
+        raise ValueError(
+            f"target_bitrate_kbps must be > 0 "
+            f"(got {cfg['target_bitrate_kbps']!r})")
+    for key in ("bitrate_tolerance", "overshoot_penalty", "undershoot_penalty",
+                "min_gain", "adopt_eps"):
+        if float(cfg[key]) < 0:
+            raise ValueError(f"{key} must be >= 0 (got {cfg[key]!r})")
+    if float(cfg["bitrate_tolerance"]) > 1.0:
+        raise ValueError(
+            f"bitrate_tolerance must be <= 1.0 "
+            f"(got {cfg['bitrate_tolerance']!r})")
+    if int(cfg["max_passes"]) < 0:
+        raise ValueError(f"max_passes must be >= 0 (got {cfg['max_passes']!r})")
+    if int(cfg["vmaf_threads"]) < 0:
+        raise ValueError(
+            f"vmaf_threads must be >= 0 (got {cfg['vmaf_threads']!r})")
+    capture = cfg.get("capture_duration")
+    if capture is not None and float(capture) <= 0:
+        raise ValueError(
+            f"capture_duration must be > 0 (got {capture!r})")
     gop = cfg.get("gop_duration")
     if gop is not None:
         gop = float(gop)
@@ -162,6 +213,31 @@ def validate_config(cfg) -> None:
                          f"(one of: {', '.join(sorted(vmaf.METRIC_KEYS))})")
 
 
+def validate_search_limits(a) -> None:
+    for key in ("max_trials", "max_seconds", "target_score"):
+        value = getattr(a, key, 0) or 0
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{key} must be finite (got {value!r})")
+        if float(value) < 0:
+            raise ValueError(f"{key} must be >= 0 (got {value!r})")
+
+
+def validate_output_window(start=None, duration=None, capture_duration=None) -> None:
+    if start is not None:
+        parsed_start = parse_time_seconds(start)
+        if not math.isfinite(parsed_start) or parsed_start < 0:
+            raise ValueError(f"start must be finite and >= 0 (got {start!r})")
+    if duration is not None and (
+            not math.isfinite(float(duration)) or float(duration) <= 0):
+        raise ValueError(f"duration must be finite and > 0 (got {duration!r})")
+    if capture_duration is not None and (
+            not math.isfinite(float(capture_duration))
+            or float(capture_duration) <= 0):
+        raise ValueError(
+            f"capture_duration must be finite and > 0 "
+            f"(got {capture_duration!r})")
+
+
 def reject_ladder_spec(data, path) -> None:
     """optimize/encode/package operate on single presets; running one against
     a ladder spec would write optimizer state into the spec and corrupt it."""
@@ -175,14 +251,23 @@ def preset_params(data, space, name="preset", log_fn=log) -> dict:
     current search point, else encoder defaults (with a warning)."""
     params = (data.get("best") or {}).get("params")
     if params:
+        frozen = (data.get("config") or {}).get("frozen") or {}
+        if not respects_frozen(space, params, frozen):
+            raise ValueError(
+                f"{name}'s saved best result violates its frozen parameters; "
+                f"run 'pqloop optimize -p {name}' once to select an eligible best")
         return params
     current = (data.get("optimizer") or {}).get("current")
     if current:
         log_fn(f"note: {name} has no completed best result; "
                "using current search point")
+        current = dict(current)
+        current.update((data.get("config") or {}).get("frozen") or {})
         return space.effective(current)
     log_fn(f"warning: {name} has no optimizer state; using encoder defaults")
-    return space.effective(space.defaults())
+    params = space.defaults()
+    params.update((data.get("config") or {}).get("frozen") or {})
+    return space.effective(params)
 
 
 def parse_freezes(space, cfg_frozen, freeze_args, unfreeze_args) -> dict:
@@ -200,6 +285,18 @@ def parse_freezes(space, cfg_frozen, freeze_args, unfreeze_args) -> dict:
         frozen[name] = value
     for name in unfreeze_args or []:
         frozen.pop(name.strip(), None)
+    for name, value in frozen.items():
+        if name not in space.params:
+            raise ValueError(
+                f"unknown frozen parameter for {space.name}: {name} "
+                f"(available: {', '.join(space.params)})")
+        spec = space.params[name]
+        if value not in spec.values:
+            choices = ", ".join("none" if v is None else str(v)
+                                for v in spec.values)
+            raise ValueError(
+                f"unsupported frozen value {name}={value!r} for {space.name} "
+                f"(curated values: {choices})")
     return frozen
 
 
@@ -214,6 +311,8 @@ OBJECTIVE_KEYS = ("encoder", "target_bitrate_kbps", "maxrate_ratio",
                   "two_pass", "extra_video_args",
                   "src_primaries", "src_trc", "tonemap", "norm_scale")
 
+TRIAL_CACHE_SCHEMA = 1
+
 
 def objective_key(cfg) -> str:
     # None-valued keys are omitted so adding an optional objective key (e.g.
@@ -223,12 +322,43 @@ def objective_key(cfg) -> str:
                        if cfg.get(k) is not None}, sort_keys=True)
 
 
-def reset_stale_state(data, opt_state, fingerprint, okey, log_fn=log) -> list:
+def _space_key(space) -> str:
+    """Hash the declarative encoder space; the manual schema covers procedural
+    argument/scoring changes while this catches candidate/emission edits."""
+    payload = {
+        "name": space.name, "codec": space.codec, "kv_flag": space.kv_flag,
+        "rc_extra": space.rc_extra, "gop_flags_extra": space.gop_flags_extra,
+        "gop_kv_extra": space.gop_kv_extra, "gop_kv_key": space.gop_kv_key,
+        "two_pass": space.two_pass,
+        "params": [asdict(spec) for spec in space.params.values()],
+    }
+    raw = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def trial_context(cfg, space, ff_enc, ff_meas, fingerprint) -> dict:
+    """Everything required for persisted trial scores to remain comparable."""
+    return {
+        "schema": TRIAL_CACHE_SCHEMA,
+        "reference": fingerprint,
+        "objective": objective_key(cfg),
+        "encoder_space": _space_key(space),
+        "encode_tools": ff_enc.identity(),
+        "measure_tools": ff_meas.identity(),
+        "cache_salt": cfg.get("cache_salt") or "",
+    }
+
+
+def reset_stale_state(data, opt_state, fingerprint, okey, log_fn=log,
+                      context=None, force=False) -> list:
     """Drop cached trials/best when the reference clip or the objective
     definition changed since the preset was last saved; the current point and
-    sensitivity ordering are kept as priors either way. Presets from before
-    objective-key tracking are grandfathered (key stored, nothing reset)."""
+    sensitivity ordering are kept as priors either way. Legacy objective keys
+    are grandfathered, while a missing provenance context intentionally causes
+    the agreed one-time safe rescore."""
     reasons = []
+    if force:
+        reasons.append("cache reset requested")
     if data.get("fingerprint") and data["fingerprint"] != fingerprint:
         reasons.append("reference clip changed")
     if data.get("objective_key") is None:
@@ -237,15 +367,31 @@ def reset_stale_state(data, opt_state, fingerprint, okey, log_fn=log) -> list:
                    "adopting the current objective settings as its baseline")
     elif data["objective_key"] != okey:
         reasons.append("objective settings changed")
+    if context is not None:
+        previous = data.get("trial_context")
+        if previous is None and opt_state.get("cache"):
+            reasons.append("cache predates toolchain provenance")
+        elif previous is not None:
+            comparable_previous = {k: v for k, v in previous.items()
+                                   if k not in ("reference", "objective")}
+            comparable_current = {k: v for k, v in context.items()
+                                  if k not in ("reference", "objective")}
+            if comparable_previous != comparable_current:
+                reasons.append("encoding or measurement toolchain changed")
     if reasons:
-        log_fn(f"{' and '.join(reasons)} since last run -> scores reset "
+        log_fn(f"{'; '.join(reasons)} -> scores reset "
                "(best parameters and impact ordering carried over)")
+        prior_best = (opt_state.get("best") or {}).get("params")
+        if prior_best:
+            opt_state["current"] = dict(prior_best)
         opt_state.pop("cache", None)
         opt_state.pop("best", None)
         opt_state["screened"] = False
         opt_state["passes_done"] = 0
     data["fingerprint"] = fingerprint
     data["objective_key"] = okey
+    if context is not None:
+        data["trial_context"] = context
     return reasons
 
 
@@ -286,6 +432,22 @@ def require_norm_caps(ff, norm_filters, what) -> None:
                 f"{what} ffmpeg ({ff.ffmpeg}) lacks the {name!r} filter needed "
                 f"for HDR normalization — point --ffmpeg at a build with "
                 f"libzimg (e.g. the system ffmpeg), or pass --tonemap off")
+
+
+def require_encode_caps(ff, encoder=None, fmt=None, audio=False, what="encode") -> None:
+    """Fail before source processing when an output tool lacks core features."""
+    if encoder and not ff.has_encoder(encoder):
+        raise RuntimeError(
+            f"{what} ffmpeg ({ff.ffmpeg}) lacks encoder {encoder!r} "
+            f"({ff.version()})")
+    muxer = {"hls": "hls", "dash": "dash", "cmaf": "dash",
+             "fmp4": "mp4", "mp4": "mp4"}.get(fmt)
+    if muxer and not ff.has_muxer(muxer):
+        raise RuntimeError(
+            f"{what} ffmpeg ({ff.ffmpeg}) lacks muxer {muxer!r}")
+    if audio and not ff.has_encoder("aac"):
+        raise RuntimeError(
+            f"{what} ffmpeg ({ff.ffmpeg}) lacks the AAC encoder")
 
 
 def prepare_source(ff, cfg, input_url, workdir, capture_name="capture.ts"):
@@ -366,6 +528,7 @@ def optimize_cli_cfg(a) -> dict:
         "ffmpeg": a.ffmpeg,
         "ffprobe": a.ffprobe,
         "vmaf_ffmpeg": a.vmaf_ffmpeg,
+        "cache_salt": a.cache_salt,
         "tune_params": [s.strip() for s in a.tune_params.split(",") if s.strip()]
                        if a.tune_params else None,
         "exclude_params": [s.strip() for s in a.exclude_params.split(",") if s.strip()]
@@ -384,10 +547,20 @@ def optimize_cli_cfg(a) -> dict:
 
 
 def cmd_optimize(a) -> int:
+    if a.dry_run:
+        return _cmd_optimize(a)
+    preset_path = presets.resolve(a.preset, a.presets_dir)
+    data = presets.load(preset_path)
+    workdir = Path(a.workdir or Path("work") / data["name"])
+    with advisory_lock(_lock_path(preset_path), f"preset {preset_path}"), \
+            advisory_lock(_lock_path(workdir), f"work directory {workdir}"):
+        return _cmd_optimize(a)
+
+
+def _cmd_optimize(a) -> int:
     preset_path = presets.resolve(a.preset, a.presets_dir)
     data = presets.load(preset_path)
     reject_ladder_spec(data, preset_path)
-    resuming = bool(data.get("optimizer", {}).get("cache"))
 
     cfg = merge_config(data.get("config") or {}, optimize_cli_cfg(a))
 
@@ -406,6 +579,7 @@ def cmd_optimize(a) -> int:
             f"(not yet validated on hardware) — check commands with --dry-run first.")
     cfg["frozen"] = parse_freezes(space, cfg.get("frozen"), a.freeze, a.unfreeze)
     validate_config(cfg)
+    validate_search_limits(a)
     data["config"] = cfg
 
     ff_enc = FF(cfg["ffmpeg"] or "ffmpeg", cfg["ffprobe"] or None)
@@ -441,10 +615,19 @@ def cmd_optimize(a) -> int:
         params = space.defaults()
         params.update((data.get("optimizer") or {}).get("current") or {})
         params.update(cfg["frozen"])
-        cmd = [cfg["ffmpeg"] or "ffmpeg", "-hide_banner", "-nostdin",
-               *runner.encode_args(params, workdir / "trials" / "tXXXX.mp4")]
-        log("baseline encode command:")
-        log("  " + shlex.join(str(c) for c in cmd))
+        out = workdir / "trials" / "tXXXX.mp4"
+        if runner._two_pass:
+            passlog = workdir / "trials" / "tXXXX.passlog"
+            log("baseline encode commands:")
+            for pass_num in (1, 2):
+                cmd = [cfg["ffmpeg"] or "ffmpeg", "-hide_banner", "-nostdin",
+                       *runner.encode_args(params, out, pass_num, passlog)]
+                log(f"  pass {pass_num}: " + shlex.join(str(c) for c in cmd))
+        else:
+            cmd = [cfg["ffmpeg"] or "ffmpeg", "-hide_banner", "-nostdin",
+                   *runner.encode_args(params, out)]
+            log("baseline encode command:")
+            log("  " + shlex.join(str(c) for c in cmd))
         return 0
 
     ff_meas = resolve_measure_ff(cfg)
@@ -464,7 +647,10 @@ def cmd_optimize(a) -> int:
         out_path=mezz_dir / "mezz.mkv", norm_filters=norm, log=log)
 
     opt_state = dict(data.get("optimizer") or {})
-    reset_stale_state(data, opt_state, mezz.fingerprint, objective_key(cfg), log)
+    context = trial_context(cfg, space, ff_enc, ff_meas, mezz.fingerprint)
+    reset_stale_state(data, opt_state, mezz.fingerprint, objective_key(cfg), log,
+                      context=context, force=bool(a.reset_cache))
+    resuming = bool(opt_state.get("cache"))
 
     if not space.params:
         log(f"note: no curated parameter space for {cfg['encoder']!r}; only the "
@@ -473,7 +659,9 @@ def cmd_optimize(a) -> int:
     run_cfg = build_run_cfg(cfg)
     runner = TrialRunner(run_cfg, ff_enc, ff_meas, space, mezz, workdir, log)
 
-    run_id = f"{run_stamp()}_{data['name']}"
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(data["name"])).strip("._") \
+        or "preset"
+    run_id = f"{run_stamp()}_{safe_name}"
     stats = stats_mod.StatsWriter(a.stats_dir or "stats", run_id)
     stats.event("meta", schema=stats_mod.SCHEMA, pqloop=__version__, config=cfg,
                 **stats_mod.host_meta(),
@@ -494,7 +682,7 @@ def cmd_optimize(a) -> int:
         f"(maxrate {runner.rc.maxrate_kbps}k, bufsize {runner.rc.bufsize_kbps}k, "
         f"GOP {runner.gop_len} ({run_cfg.gop_duration or run_cfg.seg_duration:g}s), "
         f"seg {cfg['seg_duration']:g}s"
-        + (", two-pass" if run_cfg.two_pass else "") + ")")
+        + (", two-pass" if runner._two_pass else "") + ")")
     log(f"  metric:    vmaf {cfg['metric']} "
         f"(model {cfg['vmaf_model'] or 'vmaf_v0.6.1 default'}, "
         f"subsample {cfg['vmaf_subsample']}); objective = vmaf - bitrate overshoot penalty")
@@ -555,6 +743,8 @@ def cmd_optimize(a) -> int:
                     include=cfg["tune_params"] or None,
                     exclude=cfg["exclude_params"], frozen=cfg["frozen"],
                     on_trial=on_trial, log=log)
+    runner.best_objective = opt.best_objective
+    runner.reconcile_best_artifacts(opt.best_params, opt.best_objective)
     holder["opt"] = opt
 
     def _sigterm(_sig, _frame):
@@ -618,6 +808,16 @@ def cmd_optimize(a) -> int:
 # --------------------------------------------------------------------------- #
 
 def cmd_encode(a) -> int:
+    out_dir = Path(a.output_dir)
+    with advisory_lock(_lock_path(out_dir), f"output directory {out_dir}"):
+        return _cmd_encode(a)
+
+
+def _cmd_encode(a) -> int:
+    validate_output_window(a.start, a.duration, a.capture_duration)
+    audio_kbps = parse_bitrate_kbps(a.audio_bitrate)
+    if audio_kbps <= 0:
+        raise ValueError(f"audio bitrate must be > 0 (got {a.audio_bitrate!r})")
     preset_path = presets.resolve(a.preset, a.presets_dir)
     if not Path(preset_path).exists():
         raise ValueError(f"preset not found: {preset_path}")
@@ -639,6 +839,7 @@ def cmd_encode(a) -> int:
     })
     validate_config(cfg)
     space = get_space(cfg["encoder"])
+    cfg["frozen"] = parse_freezes(space, cfg.get("frozen"), None, None)
 
     params = preset_params(data, space, name=data.get("name", "preset"))
 
@@ -646,6 +847,8 @@ def cmd_encode(a) -> int:
         raise ValueError("preset has no target bitrate; pass --target-bitrate")
 
     ff = FF(cfg["ffmpeg"] or "ffmpeg", cfg["ffprobe"] or None)
+    require_encode_caps(ff, encoder=space.codec, fmt=a.format,
+                        what="encode")
     input_url = a.input or cfg.get("last_input")
     if not input_url:
         raise ValueError("no input: pass --input FILE|udp://...")
@@ -664,6 +867,8 @@ def cmd_encode(a) -> int:
     else:
         src = media.probe_file(ff, input_url, program=cfg.get("program"),
                                audio_stream=cfg.get("audio_stream"))
+    if not a.no_audio and src.has_audio:
+        require_encode_caps(ff, audio=True, what="encode")
     norm = media.normalization_filters(src, cfg)
     if norm:
         require_norm_caps(ff, norm, "encode")
@@ -671,13 +876,22 @@ def cmd_encode(a) -> int:
     log(f"encoding with params: {json.dumps(params, sort_keys=True)}")
     result = final_encode(ff, space, params, cfg, src, out_dir,
                           fmt=a.format, hls_segment_type=a.hls_segment_type,
-                          audio_kbps=parse_bitrate_kbps(a.audio_bitrate),
+                          audio_kbps=audio_kbps,
                           want_audio=not a.no_audio,
                           start=parse_time_seconds(a.start) if a.start else None,
                           duration=a.duration, log=log)
+    fixed = package.finalize_manifests(
+        a.format, out_dir, fps=result["fps"],
+        audio_codec=(package.AAC_CODEC
+                     if not a.no_audio and src.has_audio else None),
+        video_codecs=(None if codec_family(space.codec) == "hevc" else []),
+        ff=ff, probe_path=result["output"])
+    if fixed:
+        log("manifest fixup: " + "; ".join(sorted(set(fixed))))
     log(f"done: {result['output']}  ({result['segments']} media files, "
         f"GOP {result['gop']} @ {result['fps']:g}fps"
-        f"{', deinterlaced' if result['deinterlaced'] else ''})")
+        f"{', deinterlaced' if result['deinterlaced'] else ''}, "
+        f"{result['passes']} pass{'es' if result['passes'] != 1 else ''})")
     return 0
 
 
@@ -686,6 +900,16 @@ def cmd_encode(a) -> int:
 # --------------------------------------------------------------------------- #
 
 def cmd_package(a) -> int:
+    out_dir = Path(a.output_dir)
+    with advisory_lock(_lock_path(out_dir), f"output directory {out_dir}"):
+        return _cmd_package(a)
+
+
+def _cmd_package(a) -> int:
+    validate_output_window(a.start, a.duration, a.capture_duration)
+    audio_kbps = parse_bitrate_kbps(a.audio_bitrate)
+    if audio_kbps <= 0:
+        raise ValueError(f"audio bitrate must be > 0 (got {a.audio_bitrate!r})")
     rungs, last_inputs = [], []
     for name in a.preset:
         preset_path = presets.resolve(name, a.presets_dir)
@@ -712,6 +936,7 @@ def cmd_package(a) -> int:
             log(f"warning: {data['name']}: --seg-duration {a.seg_duration:g} overrides "
                 f"the value its parameters were tuned at ({stored['seg_duration']:g}s)")
         space = get_space(cfg["encoder"])
+        cfg["frozen"] = parse_freezes(space, cfg.get("frozen"), None, None)
         params = preset_params(data, space, name=data["name"])
         ff = FF(cfg["ffmpeg"] or "ffmpeg", cfg["ffprobe"] or None)
         rungs.append(package.Rung(preset_name=data["name"], cfg=cfg, space=space,
@@ -731,8 +956,14 @@ def cmd_package(a) -> int:
     work_dir = out_dir / "_work"
     ff_mux = FF(a.ffmpeg, a.ffprobe or None) if a.ffmpeg else rungs[0].ff
     first_cfg = rungs[0].cfg
+    for rung in rungs:
+        require_encode_caps(rung.ff, encoder=rung.space.codec,
+                            what=f"rung {rung.preset_name}")
+    require_encode_caps(ff_mux, fmt=a.format, what="package")
+    live_input = media.is_live_url(input_url)
+    package.validate_source_selections(rungs, live=live_input)
 
-    if media.is_live_url(input_url):
+    if live_input:
         if not a.capture_duration:
             raise ValueError("live input: pass --capture-duration SECONDS to bound the recording")
         captured = media.get_or_capture_live(
@@ -745,6 +976,10 @@ def cmd_package(a) -> int:
         src = media.probe_file(ff_mux, input_url,
                                program=first_cfg.get("program"),
                                audio_stream=first_cfg.get("audio_stream"))
+
+    package.validate_source_pipelines(rungs, src, live=live_input)
+    if not a.no_audio and src.has_audio:
+        require_encode_caps(ff_mux, audio=True, what="package")
 
     # each rung encodes with its own binary — every distinct one must be able
     # to run the normalization chain its rung asks for
@@ -774,7 +1009,7 @@ def cmd_package(a) -> int:
     use_audio = not a.no_audio and src.has_audio
     inter = package.build_intermediates(
         rungs, src, work_dir, want_audio=use_audio,
-        audio_kbps=parse_bitrate_kbps(a.audio_bitrate),
+        audio_kbps=audio_kbps,
         start=start, duration=a.duration, reuse=not a.no_reuse,
         ff_audio=ff_mux, log=log)
 
@@ -788,16 +1023,12 @@ def cmd_package(a) -> int:
     ff_mux.run(mux, timeout=package.mux_timeout(dur, len(rungs)))
 
     video_codecs = package.video_codec_strings(rungs, inter["video"])
-    if a.format in ("hls", "cmaf"):
-        fixed = package.fixup_master(out_dir / "master.m3u8", fps=rungs[0].fps,
-                                     audio_codec=package.AAC_CODEC if inter["audio"] else None,
-                                     video_codecs=video_codecs)
-        if fixed:
-            log("master playlist fixup: " + "; ".join(fixed))
-    if a.format in ("dash", "cmaf"):
-        fixed = package.fixup_mpd(out_dir / "manifest.mpd", video_codecs)
-        if fixed:
-            log("manifest fixup: " + "; ".join(fixed))
+    fixed = package.finalize_manifests(
+        a.format, out_dir, fps=rungs[0].fps,
+        audio_codec=package.AAC_CODEC if inter["audio"] else None,
+        video_codecs=video_codecs)
+    if fixed:
+        log("manifest fixup: " + "; ".join(sorted(set(fixed))))
 
     lines, level_warnings = package.stream_report(rungs, inter["video"])
     log("rungs:")
@@ -841,10 +1072,22 @@ def _parse_cli(parser, argv, context):
 LADDER_UNIFORM_KEYS = ("encoder", "seg_duration", "deinterlace", "deint_mode",
                        "clip_start", "clip_duration", "program",
                        "src_primaries", "src_trc", "tonemap", "norm_scale",
-                       "audio_stream")
+                       "audio_stream", "capture_duration", "extra_input_args")
+LADDER_LIVE_UNIFORM_KEYS = {"capture_duration", "extra_input_args"}
 
 
 def cmd_ladder(a) -> int:
+    spec_path = presets.resolve(a.preset, a.presets_dir)
+    with advisory_lock(_lock_path(spec_path), f"ladder {spec_path}"):
+        return _cmd_ladder(a)
+
+
+def _cmd_ladder(a) -> int:
+    if a.output_dir:
+        validate_output_window(a.start, a.duration, a.capture_duration)
+        if parse_bitrate_kbps(a.audio_bitrate) <= 0:
+            raise ValueError(
+                f"audio bitrate must be > 0 (got {a.audio_bitrate!r})")
     spec_path = presets.resolve(a.preset, a.presets_dir)
     spec = ladder_mod.load_spec(spec_path, a.preset)
     if not spec.get("rungs") and (spec.get("config") or spec.get("optimizer")):
@@ -892,11 +1135,18 @@ def cmd_ladder(a) -> int:
         ns = _parse_cli(parser, argv, f"rung {rung['preset']} optimize")
         cfg = merge_config(data.get("config") or {}, optimize_cli_cfg(ns))
         validate_config(cfg)
+        validate_search_limits(ns)
+        parse_freezes(get_space(cfg["encoder"]), cfg.get("frozen"),
+                      ns.freeze, ns.unfreeze)
         merged_cfgs[rung["preset"]] = cfg
         plans.append((rung, ns, path))
     for key in LADDER_UNIFORM_KEYS:
+        if not live and key in LADDER_LIVE_UNIFORM_KEYS:
+            continue
         values = {name: cfg.get(key) for name, cfg in merged_cfgs.items()}
-        if len(set(values.values())) > 1:
+        comparable = {json.dumps(value, sort_keys=True, default=str)
+                      for value in values.values()}
+        if len(comparable) > 1:
             raise ValueError(
                 f"rung presets disagree on {key} ({values}) — the rungs must "
                 f"share the reference clip and segment grid; pass the flag on "
@@ -1147,7 +1397,8 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--tune-params", help="only tune these (comma separated)")
     o.add_argument("--exclude-params", help="never tune these (comma separated)")
     o.add_argument("--freeze", action="append", metavar="NAME=VALUE",
-                   help="pin a parameter (repeatable); excluded from tuning")
+                   help="pin a parameter to one of its curated values "
+                        "(repeatable); excluded from tuning")
     o.add_argument("--unfreeze", action="append", metavar="NAME")
     o.add_argument("--two-pass", action=Bool, default=None,
                    help="two-pass rate control (libx264/libx265)")
@@ -1158,6 +1409,12 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--ffprobe")
     o.add_argument("--vmaf-ffmpeg", help="measurement ffmpeg with libvmaf "
                                          "(auto-detected if omitted)")
+    o.add_argument("--cache-salt",
+                   help="extra cache provenance token for driver, firmware, or "
+                        "dynamic encoder changes not visible in ffmpeg --version")
+    o.add_argument("--reset-cache", action="store_true",
+                   help="discard cached scores/best once, retaining parameters "
+                        "and sensitivity ordering as search priors")
     o.add_argument("--work-dir", "--workdir", dest="workdir",
                    help="working directory (default work/<preset>)")
     o.add_argument("--mezz-dir",
@@ -1314,6 +1571,8 @@ def build_parser() -> argparse.ArgumentParser:
     la.add_argument("--ffmpeg")
     la.add_argument("--ffprobe")
     la.add_argument("--vmaf-ffmpeg")
+    la.add_argument("--cache-salt")
+    la.add_argument("--reset-cache", action="store_true")
     la.add_argument("--extra-video-args")
     la.add_argument("--extra-input-args")
     # forwarded to the package step
@@ -1353,7 +1612,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args) or 0
-    except (ValueError, RuntimeError, FFmpegError) as exc:
+    except (ValueError, RuntimeError, FFmpegError, OSError) as exc:
         print(f"pqloop error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

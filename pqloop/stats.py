@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .util import now_iso
 
-SCHEMA = 2   # bump when the event record shape changes
+SCHEMA = 3   # v3 adds probe/vmaf/total phase timings to trial metrics
 
 
 def host_meta() -> dict:
@@ -28,7 +28,9 @@ class StatsWriter:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.run_id = run_id
         self.path = self.dir / f"{run_id}.jsonl"
-        self._fh = open(self.path, "w")
+        # run_stamp includes nanoseconds + pid; exclusive creation is the final
+        # guard against accidental truncation on shared stats directories.
+        self._fh = open(self.path, "x")
 
     def event(self, kind, **payload):
         record = {"ts": now_iso(), "kind": kind, "run_id": self.run_id}
@@ -110,8 +112,15 @@ def summarize(jsonl_path) -> str:
         if mezz:
             lines.append(f"clip:     {mezz.get('duration'):.6g}s @ {mezz.get('fps'):.6g}fps"
                          f" (deinterlaced: {mezz.get('deinterlaced')})")
+    encode_s = sum(t.get("metrics", {}).get("encode_time_s", 0) for t in real)
+    vmaf_s = sum(t.get("metrics", {}).get("vmaf_time_s", 0) for t in real)
+    trial_s = sum(t.get("metrics", {}).get(
+        "trial_time_s", t.get("metrics", {}).get("encode_time_s", 0)) for t in real)
+    timing = f"{encode_s:.0f}s encoding"
+    if any("trial_time_s" in t.get("metrics", {}) for t in real):
+        timing += f", {vmaf_s:.0f}s VMAF, {trial_s:.0f}s trial time"
     lines.append(f"trials:   {len(real)} encodes ({len(trials) - len(real)} cache hits), "
-                 f"{sum(t.get('metrics', {}).get('encode_time_s', 0) for t in real):.0f}s encoding")
+                 + timing)
     baseline = next((t for t in trials if t.get("phase") == "baseline"), None)
     if baseline and baseline.get("ok"):
         lines.append(f"baseline: objective {baseline['objective']:.3f}  "

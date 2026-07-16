@@ -16,7 +16,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
-from .util import parse_fps, fingerprint_file, atomic_write_json, load_json, now_iso
+from .util import (advisory_lock, atomic_write_json, fingerprint_file,
+                   load_json, now_iso, parse_fps)
 
 LIVE_SCHEMES = ("udp", "rtp", "srt", "rist")
 INTERLACED_ORDERS = ("tt", "bb", "tb", "bt")
@@ -232,6 +233,15 @@ def capture_live(ff, url, seconds, out_path, extra_input_args=(), program=None,
 
 def get_or_capture_live(ff, url, seconds, out_path, extra_input_args=(),
                         program=None, reuse=False, log=None) -> str:
+    """Capture/reuse one live source while serializing access to its artifact."""
+    lock_path = Path(str(out_path) + ".pqloop.lock")
+    with advisory_lock(lock_path, f"live capture {out_path}"):
+        return _get_or_capture_live(ff, url, seconds, out_path,
+                                    extra_input_args, program, reuse, log)
+
+
+def _get_or_capture_live(ff, url, seconds, out_path, extra_input_args=(),
+                         program=None, reuse=False, log=None) -> str:
     """Capture the live url, or — when `reuse` is set — keep an existing capture
     whose sidecar meta matches url/program/input-args and covers `seconds`.
     Reuse is what lets a live optimization resume on identical reference frames."""
@@ -407,6 +417,17 @@ def _mezz_inputs_key(source: SourceInfo, start, duration, deinterlaced,
 def get_or_build_mezzanine(ff, source: SourceInfo, start, duration,
                            deint, deint_mode, out_path, norm_filters=(),
                            log=None) -> MezzInfo:
+    """Build/reuse a reference mezzanine under an artifact-level lock."""
+    lock_path = Path(str(out_path) + ".pqloop.lock")
+    with advisory_lock(lock_path, f"mezzanine {out_path}"):
+        return _get_or_build_mezzanine(
+            ff, source, start, duration, deint, deint_mode, out_path,
+            norm_filters, log)
+
+
+def _get_or_build_mezzanine(ff, source: SourceInfo, start, duration,
+                            deint, deint_mode, out_path, norm_filters=(),
+                            log=None) -> MezzInfo:
     out_path = Path(out_path)
     meta_path = out_path.with_suffix(out_path.suffix + ".json")
     deinterlaced = deinterlace_decision(source, deint)

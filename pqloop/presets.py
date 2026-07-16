@@ -17,6 +17,8 @@ from pathlib import Path
 from . import __version__
 from .util import now_iso, atomic_write_json
 
+PRESET_SCHEMA = 1
+
 
 def resolve(name_or_path, presets_dir) -> Path:
     s = str(name_or_path)
@@ -27,6 +29,7 @@ def resolve(name_or_path, presets_dir) -> Path:
 
 def fresh(name) -> dict:
     return {
+        "preset_schema": PRESET_SCHEMA,
         "pqloop_version": __version__,
         "name": name,
         "created": now_iso(),
@@ -46,6 +49,11 @@ def load(path) -> dict:
     with open(path) as fh:
         data = json.load(fh)
     data.setdefault("name", path.stem)
+    data.setdefault("preset_schema", 0)
+    if int(data["preset_schema"]) > PRESET_SCHEMA:
+        raise ValueError(
+            f"preset {path} uses schema {data['preset_schema']}, newer than "
+            f"this pqloop supports ({PRESET_SCHEMA})")
     for key, default in (("config", {}), ("optimizer", {}), ("best", {}),
                          ("runs", []), ("fingerprint", None)):
         data.setdefault(key, default)
@@ -55,6 +63,7 @@ def load(path) -> dict:
 def save(path, data) -> None:
     data["updated"] = now_iso()
     data["pqloop_version"] = __version__
+    data["preset_schema"] = PRESET_SCHEMA
     atomic_write_json(path, data)
 
 
@@ -66,7 +75,7 @@ def list_presets(presets_dir):
     for p in sorted(d.glob("*.json")):
         try:
             data = load(p)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, ValueError):
             continue
         if data.get("rungs"):
             # ladder spec, not a preset: show it as its own kind of row

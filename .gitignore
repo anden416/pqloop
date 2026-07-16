@@ -6,5 +6,6 @@ stats/
 __pycache__/
 *.egg-info/
 *.pyc
+*.pqloop.lock
 CLAUDE.md
 AGENTS.md

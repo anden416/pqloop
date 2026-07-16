@@ -24,10 +24,15 @@ from pathlib import Path
 from . import __version__, media, segment
 from .encoders import codec_family
 from .ffmpeg import FFmpegError
-from .util import atomic_write_json, fingerprint_file, load_json
+from .util import atomic_write_json, atomic_write_text, fingerprint_file, load_json
 
 # phase A encodes audio with ffmpeg's native AAC-LC encoder
 AAC_CODEC = "mp4a.40.2"
+
+
+def _tool_identity(ff):
+    identity = getattr(ff, "identity", None)
+    return identity() if identity else {"version": ff.version()}
 
 
 @dataclass
@@ -117,6 +122,54 @@ def validate_rungs(rungs) -> list:
     return warnings
 
 
+def validate_source_selections(rungs, live=False) -> None:
+    """Validate shared stream/input choices before any live capture is spent."""
+    if not rungs:
+        return
+
+    def values(key):
+        return {json.dumps(r.cfg.get(key), sort_keys=True, default=str)
+                for r in rungs}
+
+    for key in ("program", "audio_stream"):
+        if len(values(key)) > 1:
+            raise ValueError(
+                f"{key} differs across presets — every rung must read the same "
+                f"source streams (override --{key.replace('_', '-')} uniformly)")
+    if live and len(values("extra_input_args")) > 1:
+        raise ValueError(
+            "extra_input_args differs across presets — one shared live capture "
+            "cannot use multiple input configurations")
+
+
+def validate_source_pipelines(rungs, source, live=False) -> None:
+    """Reject cross-rung source choices that would produce unlike pictures.
+
+    The ladder command already enforces raw config equality during preflight;
+    direct ``package`` needs the equivalent protection, expressed in terms of
+    the effective pipeline so harmless aliases such as auto/off on a
+    progressive source remain compatible.
+    """
+    if not rungs:
+        return
+    validate_source_selections(rungs, live=live)
+
+    pipeline_keys = []
+    for r in rungs:
+        deint = media.deinterlace_decision(
+            source, r.cfg.get("deinterlace") or "auto")
+        deint_mode = r.cfg.get("deint_mode") or "field"
+        filters = media.build_filters(deint, deint_mode)
+        filters += media.normalization_filters(source, r.cfg)
+        _, fps_str = media.output_fps(source.fps, source.fps_str,
+                                      deint, deint_mode)
+        pipeline_keys.append((tuple(filters), fps_str))
+    if len(set(pipeline_keys)) > 1:
+        raise ValueError(
+            "source normalization/deinterlace differs across presets — every "
+            "rung must be derived from the same effective source pipeline")
+
+
 # --------------------------------------------------------------------------- #
 # phase A: intermediates
 # --------------------------------------------------------------------------- #
@@ -164,19 +217,26 @@ def build_intermediates(rungs, source, work_dir, want_audio=True, audio_kbps=128
     src_fp = fingerprint_file(source.path)
     videos = []
     for r in rungs:
-        args, out_path, meta = segment.build_encode_args(
+        plan = segment.build_encode_plan(
             r.space, r.params, r.cfg, source, work_dir / r.name, fmt="mp4",
             want_audio=False, start=start, duration=duration, faststart=False)
+        out_path, meta = plan.main_output, plan.meta
         sidecar = work_dir / f"{r.name}.json"
-        identity = {"pqloop": __version__, "ffmpeg": r.ff.version(),
-                    "source_fp": src_fp, "args": [str(a) for a in args]}
+        identity = {"pqloop": __version__, "tools": _tool_identity(r.ff),
+                    "source_fp": src_fp,
+                    "commands": [[str(a) for a in args]
+                                 for args in plan.commands]}
         if reuse and _intermediate_ready(r.ff, out_path, sidecar, identity):
             log(f"rung {r.name}: reusing intermediate ({out_path})")
         else:
             log(f"rung {r.name}: encoding {r.cfg['encoder']} @ {r.target_kbps}k "
-                f"{r.width}x{r.height} (GOP {meta['gop']} @ {meta['fps']:g}fps)")
+                f"{r.width}x{r.height} (GOP {meta['gop']} @ {meta['fps']:g}fps, "
+                f"{meta['passes']} pass{'es' if meta['passes'] != 1 else ''})")
+            if meta["two_pass_requested"] and not meta["two_pass"]:
+                log(f"note: --two-pass not supported for {r.space.name}; "
+                    f"using single pass")
             (work_dir / r.name).mkdir(parents=True, exist_ok=True)
-            r.ff.run(args, timeout=meta["timeout"])
+            segment.run_encode_plan(r.ff, plan)
             atomic_write_json(sidecar, identity)
         videos.append(out_path)
 
@@ -186,7 +246,7 @@ def build_intermediates(rungs, source, work_dir, want_audio=True, audio_kbps=128
         audio_path = work_dir / "audio.mp4"
         args = audio_args(source, audio_path, audio_kbps, start, duration)
         sidecar = work_dir / "audio.json"
-        identity = {"pqloop": __version__, "ffmpeg": ff.version(),
+        identity = {"pqloop": __version__, "tools": _tool_identity(ff),
                     "source_fp": src_fp, "args": [str(a) for a in args]}
         if reuse and _intermediate_ready(ff, audio_path, sidecar, identity):
             log("audio: reusing intermediate")
@@ -288,20 +348,20 @@ def video_codec_strings(rungs, video_paths) -> list:
     needs fixing. ffmpeg's dash muxer writes a bare 'hvc1' into both manifests
     (invalid — Safari and strict DASH players reject it); the real profile and
     level come from probing the intermediates we just encoded."""
-    out = []
-    for r, path in zip(rungs, video_paths):
-        codec = None
-        try:
-            streams = r.ff.probe(path).get("streams", [])
-            st = next((s for s in streams
-                       if s.get("codec_type") == "video"), {})
-            if st.get("codec_name") == "hevc":
-                codec = rfc6381_hevc(st.get("profile"), st.get("level"),
-                                     st.get("tier"))
-        except FFmpegError:
-            pass
-        out.append(codec)
-    return out
+    return [video_codec_string(r.ff, path) for r, path in zip(rungs, video_paths)]
+
+
+def video_codec_string(ff, path):
+    """Probe one encoded output and return the HEVC RFC 6381 string to fix."""
+    try:
+        streams = ff.probe(path).get("streams", [])
+        st = next((s for s in streams if s.get("codec_type") == "video"), {})
+        if st.get("codec_name") == "hevc":
+            return rfc6381_hevc(st.get("profile"), st.get("level"),
+                                st.get("tier"))
+    except FFmpegError:
+        pass
+    return None
 
 
 _BARE_HEVC = re.compile(r"^(hvc1|hev1)$")
@@ -339,7 +399,7 @@ def fixup_mpd(mpd_path, video_codecs) -> list:
     fixed_text = re.sub(r'codecs="(?:hvc1|hev1)"',
                         lambda _m: f'codecs="{next(it)}"', text)
     fixed_text += f"<!-- pqloop-fixup ({__version__}): hevc codec strings -->\n"
-    mpd_path.write_text(fixed_text)
+    atomic_write_text(mpd_path, fixed_text)
     return ["hevc codec strings completed"]
 
 
@@ -476,8 +536,25 @@ def fixup_master(master_path, fps=None, audio_codec=None, video_codecs=None) -> 
 
     if fixed:
         out.append(f"# pqloop-fixup ({__version__}): " + "; ".join(sorted(fixed)))
-        master_path.write_text("\n".join(out) + "\n")
+        atomic_write_text(master_path, "\n".join(out) + "\n")
     return sorted(fixed)
+
+
+def finalize_manifests(fmt, out_dir, fps=None, audio_codec=None,
+                       video_codecs=None, ff=None, probe_path=None) -> list:
+    """Apply the same strict manifest fixups to direct and ABR outputs."""
+    out_dir = Path(out_dir)
+    if video_codecs is None and ff is not None and probe_path is not None:
+        video_codecs = [video_codec_string(ff, probe_path)]
+    video_codecs = list(video_codecs or [])
+    fixed = []
+    if fmt in ("hls", "cmaf"):
+        fixed += fixup_master(out_dir / "master.m3u8", fps=fps,
+                              audio_codec=audio_codec,
+                              video_codecs=video_codecs)
+    if fmt in ("dash", "cmaf"):
+        fixed += fixup_mpd(out_dir / "manifest.mpd", video_codecs)
+    return fixed
 
 
 # --------------------------------------------------------------------------- #
@@ -531,7 +608,8 @@ def verify_package(rungs, video_paths, seg_duration, log=None) -> list:
     keyframes = []
     problems = []
     for r, path in zip(rungs, video_paths):
-        rows = r.ff.probe_entries(path, "packet", "pts_time,flags", select="v:0")
+        read_rows = getattr(r.ff, "iter_probe_entries", r.ff.probe_entries)
+        rows = read_rows(path, "packet", "pts_time,flags", select="v:0")
         kfs = [float(d["pts_time"]) for d in rows if "K" in d.get("flags", "")]
         keyframes.append(kfs)
         window = 2 * float(seg_duration)

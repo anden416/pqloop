@@ -15,6 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+def _kv_value(value) -> str:
+    """Escape private-option separators (not shell escaping; argv is a list)."""
+    return str(value).replace("\\", "\\\\").replace(":", "\\:")
+
+
 @dataclass(frozen=True)
 class ParamSpec:
     name: str
@@ -94,7 +99,14 @@ class EncoderSpace:
     # ---- ffmpeg argument emission ------------------------------------------
 
     def video_args(self, config, gop_len=None, seg_duration=None, rc=None,
-                   extra_kv=None) -> list:
+                   extra_kv=None, pass_num=0, passlog=None) -> list:
+        """Build encoder arguments for one encode pass.
+
+        ``pass_num`` is shared by optimization trials and final/package
+        encodes so a preset measured with two-pass rate control is shipped the
+        same way.  x264-style encoders use ffmpeg's ``-pass`` flags; x265-style
+        encoders carry pass state inside their private key/value option.
+        """
         eff = self.effective(config)
         args = ["-c:v", self.codec]
         kv = {}
@@ -121,11 +133,22 @@ class EncoderSpace:
                 kv[self.gop_kv_key] = int(gop_len)
             if seg_duration:
                 args += ["-force_key_frames", f"expr:gte(t,n_forced*{seg_duration:g})"]
+        if pass_num:
+            if self.two_pass == "kv":
+                if passlog is None:
+                    raise ValueError("two-pass encoding requires a passlog path")
+                kv.update({"pass": int(pass_num), "stats": str(passlog)})
+            elif self.two_pass == "flags":
+                if passlog is None:
+                    raise ValueError("two-pass encoding requires a passlog path")
+                args += ["-pass", str(int(pass_num)),
+                         "-passlogfile", str(passlog)]
         if extra_kv:
             kv.update(extra_kv)
         if kv:
             if self.kv_flag:
-                args += [self.kv_flag, ":".join(f"{k}={v}" for k, v in kv.items())]
+                args += [self.kv_flag,
+                         ":".join(f"{k}={_kv_value(v)}" for k, v in kv.items())]
             else:
                 for k, v in kv.items():
                     args += [f"-{k}", str(v)]
