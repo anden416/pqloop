@@ -209,10 +209,11 @@ def _intermediate_ready(ff, out_path, sidecar, identity) -> bool:
 
 def build_intermediates(rungs, source, work_dir, want_audio=True, audio_kbps=128,
                         start=None, duration=None, reuse=True, ff_audio=None,
-                        log=None) -> dict:
+                        log=None, progress=None) -> dict:
     """Encode (or reuse) per-rung video intermediates plus the shared audio
     intermediate. Returns {"video": [path, ...] in rung order, "audio": path|None}."""
     log = log or (lambda m: None)
+    progress = progress or log
     work_dir = Path(work_dir)
     src_fp = fingerprint_file(source.path)
     videos = []
@@ -236,7 +237,7 @@ def build_intermediates(rungs, source, work_dir, want_audio=True, audio_kbps=128
                 log(f"note: --two-pass not supported for {r.space.name}; "
                     f"using single pass")
             (work_dir / r.name).mkdir(parents=True, exist_ok=True)
-            segment.run_encode_plan(r.ff, plan)
+            segment.run_encode_plan(r.ff, plan, progress=progress)
             atomic_write_json(sidecar, identity)
         videos.append(out_path)
 

@@ -1,3 +1,4 @@
+import io
 import json
 import math
 import tempfile
@@ -279,6 +280,60 @@ class SegmentTest(unittest.TestCase):
                     {"target_bitrate_kbps": 3000, "two_pass": True},
                     _source(has_audio=False), td, fmt="mp4")
             self.assertEqual(list(Path(td).glob(".pqloop-passlog*")), [])
+
+    def test_final_encode_reports_ffmpeg_progress(self):
+        class ProgressFF(_FakeFF):
+            def run_progress(self, args, callback, timeout=None):
+                self.run(args, timeout)
+                callback({
+                    "frame": "750", "fps": "125.00",
+                    "out_time_us": "15000000", "speed": "2.50x",
+                    "progress": "continue",
+                })
+                callback({
+                    "frame": "3000", "fps": "128.00",
+                    "out_time_us": "60000000", "speed": "2.56x",
+                    "progress": "end",
+                })
+
+        with tempfile.TemporaryDirectory() as td:
+            messages = []
+            ff = ProgressFF()
+            space = get_space("libx264")
+            segment.final_encode(
+                ff, space, space.defaults(),
+                {"target_bitrate_kbps": 3000}, _source(), td,
+                fmt="mp4", duration=60, log=messages.append)
+
+        progress = [message for message in messages
+                    if message.startswith("encode pass")]
+        self.assertEqual(len(progress), 2)
+        first_bar = progress[0].split("[", 1)[1].split("]", 1)[0]
+        final_bar = progress[1].split("[", 1)[1].split("]", 1)[0]
+        self.assertLess(first_bar.count("█"), final_bar.count("█"))
+        self.assertNotIn("░", final_bar)
+        self.assertIn("25.0%", progress[0])
+        self.assertIn("00:15/01:00", progress[0])
+        self.assertIn("125.00fps", progress[0])
+        self.assertIn("2.50x", progress[0])
+        self.assertIn("100.0%", progress[1])
+        self.assertIn("| done", progress[1])
+
+    def test_console_progress_rewrites_one_terminal_line(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        terminal = Terminal()
+        display = cli._ConsoleProgress(terminal, columns=80)
+        display("encoding [██░░] 50%")
+        display("encoding [████] 100% | done")
+        display.complete()
+
+        rendered = terminal.getvalue()
+        self.assertEqual(rendered.count("\r"), 2)
+        self.assertEqual(rendered.count("\n"), 1)
+        self.assertTrue(rendered.endswith("\n"))
 
 
 class PackageTest(unittest.TestCase):

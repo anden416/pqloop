@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -141,7 +142,8 @@ def build_encode_args(space, params, cfg, source, out_dir, fmt="hls",
         0.0, (source.duration or 0.0) - float(start or 0.0))
     timeout = max(1800.0, enc_dur * 240 + 900) if enc_dur > 0 else 21600.0
     meta = {"deinterlaced": deinterlaced, "fps": fps, "gop": gop_len,
-            "seg": seg, "target": target, "timeout": timeout}
+            "seg": seg, "target": target, "duration": enc_dur,
+            "timeout": timeout}
     return args, main_output, meta
 
 
@@ -187,18 +189,123 @@ def cleanup_passlog(passlog) -> None:
             pass
 
 
-def run_encode_plan(ff, plan: EncodePlan) -> None:
+def _progress_seconds(record) -> float:
+    """Extract encoded media time from an ffmpeg ``-progress`` record."""
+    for key in ("out_time_us", "out_time_ms"):
+        try:
+            return max(0.0, float(record[key]) / 1_000_000.0)
+        except (KeyError, TypeError, ValueError):
+            pass
+    try:
+        hours, minutes, seconds = str(record["out_time"]).split(":", 2)
+        return max(0.0, int(hours) * 3600 + int(minutes) * 60 + float(seconds))
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+
+
+def _clock(seconds) -> str:
+    total = max(0, int(float(seconds) + 0.5))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+class _EncodeProgress:
+    """Turn ffmpeg progress records into compact, rate-limited log lines."""
+
+    def __init__(self, log, pass_number, passes, duration):
+        self.log = log
+        self.label = f"encode pass {pass_number}/{passes}"
+        self.duration = float(duration or 0.0)
+        self.bar_width = max(1, int(getattr(log, "bar_width", 24)))
+        self.in_place = bool(getattr(log, "in_place", False))
+        self.last_log_at = None
+        self.last_percent_bucket = -1
+        self.latest = {}
+        self.done = False
+
+    def __call__(self, record):
+        self.latest = dict(record)
+        position = _progress_seconds(record)
+        percent = (min(100.0, position * 100.0 / self.duration)
+                   if self.duration > 0 else None)
+        percent_bucket = int(percent // 5) if percent is not None else -1
+        now = time.monotonic()
+        finished = record.get("progress") == "end"
+        if not finished and not self.in_place and self.last_log_at is not None:
+            new_bucket = percent_bucket > self.last_percent_bucket
+            if not new_bucket and now - self.last_log_at < 10.0:
+                return
+
+        shown_percent = 100.0 if finished and percent is not None else percent
+        if shown_percent is not None:
+            filled = int(shown_percent * self.bar_width / 100.0)
+            if shown_percent > 0 and filled == 0:
+                filled = 1
+            if shown_percent < 100.0:
+                filled = min(self.bar_width - 1, filled)
+            else:
+                filled = self.bar_width
+            bar = "█" * filled + "░" * (self.bar_width - filled)
+            message = f"{self.label} [{bar}] {shown_percent:5.1f}%"
+        else:
+            message = f"{self.label}: {_clock(position)} encoded"
+
+        if self.duration > 0:
+            message += f" {_clock(position)}/{_clock(self.duration)}"
+        details = []
+        fps = str(record.get("fps", "")).strip()
+        speed = str(record.get("speed", "")).strip()
+        if fps and fps != "0.00":
+            details.append(f"{fps}fps")
+        if speed and speed != "N/A":
+            details.append(speed)
+        if details:
+            message += " | " + " | ".join(details)
+        if finished:
+            message += " | done"
+        self.log(message)
+        if finished:
+            complete = getattr(self.log, "complete", None)
+            if callable(complete):
+                complete()
+        self.last_log_at = now
+        self.last_percent_bucket = max(self.last_percent_bucket, percent_bucket)
+        self.done = finished
+
+    def finish(self):
+        """Some ffmpeg builds omit the final marker; still close the display."""
+        if not self.done:
+            record = dict(self.latest)
+            record["progress"] = "end"
+            self(record)
+
+
+def run_encode_plan(ff, plan: EncodePlan, progress=None) -> None:
     """Execute an EncodePlan and always remove two-pass scratch files."""
     try:
-        for args in plan.commands:
-            ff.run(args, timeout=plan.meta["timeout"])
+        passes = len(plan.commands)
+        progress_runner = getattr(ff, "run_progress", None)
+        for index, args in enumerate(plan.commands, 1):
+            if progress is not None and callable(progress_runner):
+                reporter = _EncodeProgress(
+                    progress, index, passes, plan.meta.get("duration", 0.0))
+                progress_runner(args, reporter, timeout=plan.meta["timeout"])
+                reporter.finish()
+            else:
+                ff.run(args, timeout=plan.meta["timeout"])
     finally:
+        complete = getattr(progress, "complete", None)
+        if callable(complete):
+            complete()
         cleanup_passlog(plan.passlog)
 
 
 def final_encode(ff, space, params, cfg, source, out_dir, fmt="hls",
                  hls_segment_type="fmp4", audio_kbps=128, want_audio=True,
-                 start=None, duration=None, log=None) -> dict:
+                 start=None, duration=None, log=None, progress=None) -> dict:
     """Encode `source` (a local file; live inputs are captured first by the CLI)
     with the tuned parameters into segmented HLS/DASH/CMAF, a single
     fragmented MP4 (fmp4), or a plain progressive MP4."""
@@ -216,7 +323,7 @@ def final_encode(ff, space, params, cfg, source, out_dir, fmt="hls",
     log(f"encoding deliverable -> {main_output} "
         f"({'deinterlaced ' if meta['deinterlaced'] else ''}{fmt}, "
         f"{meta['target']}k, GOP {gop_len} @ {fps:g}fps, seg {meta['seg']:g}s)")
-    run_encode_plan(ff, plan)
+    run_encode_plan(ff, plan, progress=progress or log)
 
     segments = sorted([p.name for p in out_dir.iterdir()
                        if p.suffix in (".m4s", ".ts", ".mp4", ".m4a")

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+import queue
 import shutil
 import subprocess
+import threading
 import time
+from collections import deque
 from pathlib import Path
 
 
@@ -92,6 +95,107 @@ class FF:
                 f"ffmpeg failed (rc={cp.returncode}): ...{_stderr_tail(cp.stderr, 800)}",
                 cmd, _stderr_tail(cp.stderr))
         return cp
+
+    def run_progress(self, args, progress, timeout=None) -> subprocess.CompletedProcess:
+        """Run ffmpeg and emit each ``-progress`` record as a dictionary.
+
+        ffmpeg normally writes its human-readable status to stderr.  ``run``
+        captures that stream so callers get useful diagnostics on failure,
+        which also makes long encodes appear silent.  The machine-readable
+        progress pipe lets us expose status while a background thread keeps
+        draining stderr for the same failure diagnostics.
+        """
+        cmd = [self.ffmpeg, "-hide_banner", "-nostdin", "-nostats",
+               "-progress", "pipe:1", *[str(a) for a in args]]
+        try:
+            cp = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, errors="replace", bufsize=1)
+        except FileNotFoundError:
+            raise FFmpegError(f"ffmpeg binary not found: {self.ffmpeg}", cmd)
+
+        events = queue.Queue()
+        stderr_lines = deque(maxlen=200)
+
+        def read_progress():
+            try:
+                for line in cp.stdout:
+                    events.put(("line", line))
+            finally:
+                events.put(("stdout_done", None))
+
+        def read_stderr():
+            try:
+                for line in cp.stderr:
+                    stderr_lines.append(line)
+            finally:
+                events.put(("stderr_done", None))
+
+        readers = [
+            threading.Thread(target=read_progress, daemon=True),
+            threading.Thread(target=read_stderr, daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+
+        started = time.monotonic()
+        record = {}
+        finished_streams = set()
+        try:
+            while len(finished_streams) < 2:
+                if timeout is None:
+                    wait_for = 0.25
+                else:
+                    remaining = timeout - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(cmd, timeout)
+                    wait_for = min(0.25, remaining)
+                try:
+                    kind, value = events.get(timeout=wait_for)
+                except queue.Empty:
+                    continue
+                if kind.endswith("_done"):
+                    finished_streams.add(kind)
+                    continue
+                key, separator, value = value.rstrip("\r\n").partition("=")
+                if not separator:
+                    continue
+                record[key] = value
+                if key == "progress":
+                    progress(dict(record))
+                    record.clear()
+
+            remaining = None if timeout is None else max(
+                0.01, timeout - (time.monotonic() - started))
+            returncode = cp.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            cp.kill()
+            cp.wait()
+            for reader in readers:
+                reader.join(timeout=1)
+            raise FFmpegError(f"ffmpeg timed out after {timeout}s", cmd)
+        except BaseException:
+            if cp.poll() is None:
+                cp.kill()
+                cp.wait()
+            raise
+        finally:
+            if cp.poll() is None:
+                cp.kill()
+                cp.wait()
+            for reader in readers:
+                reader.join(timeout=1)
+            if cp.stdout:
+                cp.stdout.close()
+            if cp.stderr:
+                cp.stderr.close()
+
+        stderr = "".join(stderr_lines)
+        if returncode != 0:
+            raise FFmpegError(
+                f"ffmpeg failed (rc={returncode}): ...{_stderr_tail(stderr, 800)}",
+                cmd, _stderr_tail(stderr))
+        return subprocess.CompletedProcess(cmd, returncode, "", stderr)
 
     def probe(self, url, input_args=(), timeout=90) -> dict:
         cmd = [self.ffprobe, "-v", "error", *[str(a) for a in input_args],

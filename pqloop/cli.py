@@ -87,6 +87,40 @@ def log(msg=""):
     print(msg, flush=True)
 
 
+class _ConsoleProgress:
+    """Render progress in place on a terminal, or as lines when redirected."""
+
+    def __init__(self, stream=None, columns=None):
+        self.stream = stream or sys.stdout
+        self.in_place = bool(getattr(self.stream, "isatty", lambda: False)())
+        if columns is None:
+            columns = shutil.get_terminal_size(fallback=(80, 24)).columns
+        self.columns = max(20, int(columns))
+        # Leave room for the pass label, percentage, time, fps, and speed.
+        self.bar_width = max(10, min(32, self.columns - 64))
+        self._rendered_width = 0
+        self._active = False
+
+    def __call__(self, message):
+        if not self.in_place:
+            self.stream.write(message + "\n")
+            self.stream.flush()
+            return
+        rendered = str(message)[:self.columns - 1]
+        padding = " " * max(0, self._rendered_width - len(rendered))
+        self.stream.write("\r" + rendered + padding)
+        self.stream.flush()
+        self._rendered_width = len(rendered)
+        self._active = True
+
+    def complete(self):
+        if self._active:
+            self.stream.write("\n")
+            self.stream.flush()
+            self._rendered_width = 0
+            self._active = False
+
+
 def _lock_path(path) -> Path:
     return Path(str(path) + ".pqloop.lock")
 
@@ -877,12 +911,12 @@ def _cmd_encode(a) -> int:
         require_norm_caps(ff, norm, "encode")
 
     log(f"encoding with params: {json.dumps(params, sort_keys=True)}")
-    result = final_encode(ff, space, params, cfg, src, out_dir,
-                          fmt=a.format, hls_segment_type=a.hls_segment_type,
-                          audio_kbps=audio_kbps,
-                          want_audio=not a.no_audio,
-                          start=parse_time_seconds(a.start) if a.start else None,
-                          duration=a.duration, log=log)
+    result = final_encode(
+        ff, space, params, cfg, src, out_dir,
+        fmt=a.format, hls_segment_type=a.hls_segment_type,
+        audio_kbps=audio_kbps, want_audio=not a.no_audio,
+        start=parse_time_seconds(a.start) if a.start else None,
+        duration=a.duration, log=log, progress=_ConsoleProgress())
     fixed = package.finalize_manifests(
         a.format, out_dir, fps=result["fps"],
         audio_codec=(package.AAC_CODEC
@@ -1014,7 +1048,7 @@ def _cmd_package(a) -> int:
         rungs, src, work_dir, want_audio=use_audio,
         audio_kbps=audio_kbps,
         start=start, duration=a.duration, reuse=not a.no_reuse,
-        ff_audio=ff_mux, log=log)
+        ff_audio=ff_mux, log=log, progress=_ConsoleProgress())
 
     seg = float(rungs[0].cfg["seg_duration"])
     mux, main_output = package.mux_args(

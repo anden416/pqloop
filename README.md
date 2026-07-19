@@ -595,7 +595,10 @@ cross-rate comparisons use the raw `vmaf_*` columns against the measured
 
 `pqloop encode` re-runs the tuned parameters on the full input (or
 `--start`/`--duration` a window) at the preset's bitrate (`--target-bitrate`
-overrides) with the same deinterlace/GOP discipline and packages:
+overrides) with the same deinterlace/GOP discipline. While each pass runs it
+shows a growing in-place progress bar with percent complete, encoded/total
+media time, FPS, and encoder speed (redirected output uses periodic log lines).
+It packages:
 
 - `--format hls` (default): fMP4, `init.mp4` + `seg_%05d.m4s` +
   `index.m3u8` + `master.m3u8` (`--hls-segment-type mpegts` for TS segments)
