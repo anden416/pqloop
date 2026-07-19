@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from .ladder import _opt, _tristate
 from .util import now_iso
 
-RATE_SEARCH_SCHEMA = 1
+RATE_SEARCH_SCHEMA = 2
 
 # The non-rate config keys that change what a sampled point measures. Tracks
 # cli.OBJECTIVE_KEYS minus the rate/penalty/metric keys: the target bitrate is
@@ -46,7 +46,7 @@ RATE_SEARCH_SCHEMA = 1
 # metric reuses the whole curve. maxrate/bufsize ratios stay in (VBV changes
 # what each rate point measures). A test pins this relationship.
 SWEEP_KEYS = ("encoder", "maxrate_ratio", "bufsize_ratio", "seg_duration",
-              "gop_duration", "pix_fmt", "scale", "vmaf_model",
+              "gop_duration", "pix_fmt", "scale", "vmaf_model", "vmaf_crop",
               "vmaf_subsample", "two_pass", "extra_video_args",
               "src_primaries", "src_trc", "tonemap", "norm_scale")
 
@@ -579,6 +579,7 @@ def retune_argv(a, input_url, kbps) -> list:
     argv += _opt("--deinterlace", a.deinterlace)
     argv += _opt("--deint-mode", a.deint_mode)
     argv += _opt("--vmaf-model", a.vmaf_model)
+    argv += _opt("--vmaf-crop", a.vmaf_crop)
     argv += _opt("--vmaf-subsample", a.vmaf_subsample)
     argv += _opt("--vmaf-threads", a.vmaf_threads)
     argv += _opt("--ffmpeg", a.ffmpeg)

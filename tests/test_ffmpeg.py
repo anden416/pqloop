@@ -67,5 +67,23 @@ class FFmpegProgressTest(unittest.TestCase):
         self.assertIn("encoder exploded", raised.exception.stderr)
 
 
+class FFmpegCapabilityTest(unittest.TestCase):
+    def test_encoder_help_is_cached(self):
+        completed = mock.Mock(
+            returncode=0,
+            stdout="Encoder hevc_nvenc\n  -lookahead_level <int>\n")
+        with mock.patch("pqloop.ffmpeg.subprocess.run",
+                        return_value=completed) as run:
+            ff = FF("custom-ffmpeg")
+            first = ff.encoder_help("hevc_nvenc")
+            second = ff.encoder_help("hevc_nvenc")
+
+        self.assertEqual(first, second)
+        self.assertIn("lookahead_level", first)
+        run.assert_called_once_with(
+            ["custom-ffmpeg", "-hide_banner", "-h", "encoder=hevc_nvenc"],
+            stdout=mock.ANY, stderr=mock.ANY, text=True, timeout=30)
+
+
 if __name__ == "__main__":
     unittest.main()

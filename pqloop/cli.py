@@ -50,6 +50,7 @@ CONFIG_DEFAULTS = {
     "scale": "",
     "metric": "mean",
     "vmaf_model": "",
+    "vmaf_crop": "",
     "vmaf_subsample": 1,
     "vmaf_threads": 0,
     "two_pass": False,
@@ -185,6 +186,7 @@ def validate_config(cfg) -> None:
         if int(w) % 2 or int(h) % 2:
             raise ValueError(f"norm_scale dimensions must be even for yuv420 "
                              f"subsampling (got {norm_scale!r})")
+    vmaf.parse_crop(cfg.get("vmaf_crop"))
     tonemap = cfg.get("tonemap")
     if tonemap is not None and tonemap not in media.TONEMAP_MODES:
         raise ValueError(f"unknown tonemap {tonemap!r} "
@@ -344,11 +346,12 @@ def parse_freezes(space, cfg_frozen, freeze_args, unfreeze_args) -> dict:
 OBJECTIVE_KEYS = ("encoder", "target_bitrate_kbps", "maxrate_ratio",
                   "bufsize_ratio", "bitrate_tolerance", "overshoot_penalty",
                   "undershoot_penalty", "seg_duration", "gop_duration",
-                  "pix_fmt", "scale", "metric", "vmaf_model", "vmaf_subsample",
+                  "pix_fmt", "scale", "metric", "vmaf_model", "vmaf_crop",
+                  "vmaf_subsample",
                   "two_pass", "extra_video_args",
                   "src_primaries", "src_trc", "tonemap", "norm_scale")
 
-TRIAL_CACHE_SCHEMA = 1
+TRIAL_CACHE_SCHEMA = 3
 
 
 def objective_key(cfg) -> str:
@@ -371,6 +374,12 @@ def _space_key(space) -> str:
     }
     raw = json.dumps(payload, sort_keys=True, default=str).encode()
     return hashlib.sha256(raw).hexdigest()
+
+
+def _specialize_space(space, ff):
+    if space.name not in ("h264_nvenc", "hevc_nvenc"):
+        return space
+    return get_space(space.name, ff.encoder_help(space.name))
 
 
 def trial_context(cfg, space, ff_enc, ff_meas, fingerprint) -> dict:
@@ -424,6 +433,7 @@ def reset_stale_state(data, opt_state, fingerprint, okey, log_fn=log,
         opt_state.pop("cache", None)
         opt_state.pop("best", None)
         opt_state["screened"] = False
+        opt_state["screened_params"] = []
         opt_state["passes_done"] = 0
     data["fingerprint"] = fingerprint
     data["objective_key"] = okey
@@ -521,7 +531,8 @@ def build_run_cfg(cfg) -> RunConfig:
         gop_duration=(float(cfg["gop_duration"])
                       if cfg.get("gop_duration") else None),
         pix_fmt=cfg["pix_fmt"], scale=cfg["scale"], metric=cfg["metric"],
-        vmaf_model=cfg["vmaf_model"], vmaf_subsample=int(cfg["vmaf_subsample"]),
+        vmaf_model=cfg["vmaf_model"], vmaf_crop=cfg["vmaf_crop"],
+        vmaf_subsample=int(cfg["vmaf_subsample"]),
         vmaf_threads=int(cfg["vmaf_threads"]), two_pass=bool(cfg["two_pass"]),
         extra_video_args=list(cfg["extra_video_args"] or []),
         keep_trials=bool(cfg["keep_trials"]),
@@ -550,6 +561,7 @@ def optimize_cli_cfg(a) -> dict:
         "scale": a.scale,
         "metric": a.metric,
         "vmaf_model": a.vmaf_model,
+        "vmaf_crop": a.vmaf_crop,
         "vmaf_subsample": a.vmaf_subsample,
         "vmaf_threads": a.vmaf_threads,
         "two_pass": a.two_pass,
@@ -625,6 +637,12 @@ def _cmd_optimize(a) -> int:
     if not a.dry_run and not ff_enc.has_encoder(cfg["encoder"]):
         raise RuntimeError(f"encoder {cfg['encoder']!r} not available in "
                            f"{cfg['ffmpeg']} ({ff_enc.version()})")
+    if not a.dry_run:
+        space = _specialize_space(space, ff_enc)
+        cfg["frozen"] = parse_freezes(
+            space, cfg.get("frozen"), None, None)
+        space.tunable(cfg["tune_params"] or None, cfg["exclude_params"],
+                      frozen=cfg["frozen"].keys())
 
     workdir = Path(a.workdir or Path("work") / data["name"])
     # capture + mezzanine location; a ladder points every rung at one shared
@@ -647,6 +665,7 @@ def _cmd_optimize(a) -> int:
             fingerprint="", deinterlaced=deinterlaced,
             filters=",".join(media.normalization_filters(src, cfg)),
             inputs_key="")
+        vmaf.parse_crop(cfg["vmaf_crop"], mezz.width, mezz.height)
         runner = TrialRunner(build_run_cfg(cfg), ff_enc, ff_enc, space, mezz,
                              workdir, log)
         params = space.defaults()
@@ -682,6 +701,7 @@ def _cmd_optimize(a) -> int:
         duration=float(cfg["clip_duration"]),
         deint=cfg["deinterlace"], deint_mode=cfg["deint_mode"],
         out_path=mezz_dir / "mezz.mkv", norm_filters=norm, log=log)
+    vmaf.parse_crop(cfg["vmaf_crop"], mezz.width, mezz.height)
 
     opt_state = dict(data.get("optimizer") or {})
     context = trial_context(cfg, space, ff_enc, ff_meas, mezz.fingerprint)
@@ -722,7 +742,9 @@ def _cmd_optimize(a) -> int:
         + (", two-pass" if runner._two_pass else "") + ")")
     log(f"  metric:    vmaf {cfg['metric']} "
         f"(model {cfg['vmaf_model'] or 'vmaf_v0.6.1 default'}, "
-        f"subsample {cfg['vmaf_subsample']}); objective = vmaf - bitrate overshoot penalty")
+        f"subsample {cfg['vmaf_subsample']}"
+        + (f", crop {cfg['vmaf_crop']}" if cfg["vmaf_crop"] else "")
+        + "); objective = vmaf - bitrate overshoot penalty")
     if cfg["frozen"]:
         log(f"  frozen:    {cfg['frozen']}")
     log("")
@@ -1291,6 +1313,7 @@ def bitrate_cli_cfg(a) -> dict:
         "deint_mode": a.deint_mode,
         "metric": a.metric,
         "vmaf_model": a.vmaf_model,
+        "vmaf_crop": a.vmaf_crop,
         "vmaf_subsample": a.vmaf_subsample,
         "vmaf_threads": a.vmaf_threads,
         "ffmpeg": a.ffmpeg,
@@ -1441,6 +1464,13 @@ def _cmd_bitrate(a):
     if not a.dry_run and not ff_enc.has_encoder(cfg["encoder"]):
         raise RuntimeError(f"encoder {cfg['encoder']!r} not available in "
                            f"{cfg['ffmpeg']} ({ff_enc.version()})")
+    if not a.dry_run:
+        space = _specialize_space(space, ff_enc)
+        cfg["frozen"] = parse_freezes(
+            space, cfg.get("frozen"), None, None)
+        params = preset_params(data, space, data["name"])
+        params_sig = json.dumps(space.effective(params), sort_keys=True,
+                                default=str)
 
     workdir = Path(a.workdir or Path("work") / data["name"])
     mezz_dir = Path(a.mezz_dir) if a.mezz_dir else workdir
@@ -1460,6 +1490,7 @@ def _cmd_bitrate(a):
             fingerprint="", deinterlaced=deinterlaced,
             filters=",".join(media.normalization_filters(src, cfg)),
             inputs_key="")
+        vmaf.parse_crop(cfg["vmaf_crop"], mezz.width, mezz.height)
         log(f"planned rates: {', '.join(f'{r}k' for r in plan)}"
             + (f"  (anchor {anchor}k)" if anchor in plan else "")
             + f"  budget {settings.encode_budget} encodes")
@@ -1499,6 +1530,7 @@ def _cmd_bitrate(a):
         duration=float(cfg["clip_duration"]),
         deint=cfg["deinterlace"], deint_mode=cfg["deint_mode"],
         out_path=mezz_dir / "mezz.mkv", norm_filters=norm, log=log)
+    vmaf.parse_crop(cfg["vmaf_crop"], mezz.width, mezz.height)
 
     context = rate_mod.sweep_context(
         cfg, params_sig, _space_key(space), ff_enc.identity(),
@@ -1870,6 +1902,8 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--two-pass", action=Bool, default=None,
                    help="two-pass rate control (libx264/libx265)")
     o.add_argument("--vmaf-model", help="libvmaf model spec, e.g. version=vmaf_v0.6.1")
+    o.add_argument("--vmaf-crop", metavar="WxH+X+Y",
+                   help="score only this crop in normalized reference coordinates")
     o.add_argument("--vmaf-subsample", type=int, help="score every Nth frame (default 1)")
     o.add_argument("--vmaf-threads", type=int)
     o.add_argument("--ffmpeg", help="encode ffmpeg binary (nvenc/netint builds etc.)")
@@ -2033,6 +2067,7 @@ def build_parser() -> argparse.ArgumentParser:
     la.add_argument("--freeze", action="append", metavar="NAME=VALUE")
     la.add_argument("--keep-trials", action=Bool, default=None)
     la.add_argument("--vmaf-model")
+    la.add_argument("--vmaf-crop", metavar="WxH+X+Y")
     la.add_argument("--vmaf-subsample", type=int)
     la.add_argument("--vmaf-threads", type=int)
     la.add_argument("--ffmpeg")
@@ -2108,6 +2143,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="vmaf aggregate driving the decision "
                          "(default: preset's)")
     bt.add_argument("--vmaf-model")
+    bt.add_argument("--vmaf-crop", metavar="WxH+X+Y")
     bt.add_argument("--vmaf-subsample", type=int)
     bt.add_argument("--vmaf-threads", type=int)
     bt.add_argument("--ffmpeg", help="encode ffmpeg binary")

@@ -32,6 +32,7 @@ class RunConfig:
     scale: str = ""                     # "WxH" or empty
     metric: str = "mean"
     vmaf_model: str = ""
+    vmaf_crop: str = ""
     vmaf_subsample: int = 1
     vmaf_threads: int = 0
     two_pass: bool = False
@@ -133,6 +134,7 @@ class TrialRunner:
             scores = vmaf.measure(
                 self.ff_meas, str(out_path), self.mezz.path,
                 self.mezz.width, self.mezz.height, str(vmaf_log),
+                self.mezz.fps_str, crop=self.cfg.vmaf_crop or None,
                 threads=self.cfg.vmaf_threads, subsample=self.cfg.vmaf_subsample,
                 model=self.cfg.vmaf_model or None,
                 timeout=max(900.0, self.mezz.duration * 60 + 300))

@@ -114,14 +114,18 @@ def save_spec(path, data) -> None:
 
 def seed_data(data, ladder_name, current=None, sens=None) -> dict:
     """Tag a rung preset with its ladder and install a warm-start prior
-    (parent point + sensitivities). The sens seeding is what makes the
-    optimizer skip screening: params with known sensitivity are never
-    re-probed, so refinement starts immediately in parent-impact order.
+    (parent point + sensitivities). Inherited sensitivity names are explicitly
+    marked as screened so they are not re-probed on the child rung.
     Mutates in place (an existing-but-never-optimized preset keeps whatever
     config it carries); only call when the optimizer state is empty."""
     data["ladder"] = ladder_name
     if current:
-        data["optimizer"] = {"current": dict(current), "sens": dict(sens or {})}
+        seeded_sens = dict(sens or {})
+        data["optimizer"] = {
+            "current": dict(current),
+            "sens": seeded_sens,
+            "screened_params": sorted(seeded_sens),
+        }
     return data
 
 
@@ -190,6 +194,7 @@ def optimize_argv(rung, a, input_url, work_root, live=False) -> list:
     argv += _opt("--target-score", a.target_score)
     argv += _opt("--max-passes", a.max_passes)
     argv += _opt("--vmaf-model", a.vmaf_model)
+    argv += _opt("--vmaf-crop", a.vmaf_crop)
     argv += _opt("--vmaf-subsample", a.vmaf_subsample)
     argv += _opt("--vmaf-threads", a.vmaf_threads)
     argv += _opt("--ffmpeg", a.ffmpeg)

@@ -181,18 +181,20 @@ class RunnerTest(unittest.TestCase):
             ff = _FakeFF(bitrate_kbps=6000)
             cfg = RunConfig(
                 encoder="libx264", target_bitrate_kbps=5000,
-                two_pass=True)
+                two_pass=True, vmaf_crop="960x540+0+540")
             runner = TrialRunner(
                 cfg, ff, ff, get_space("libx264"),
                 _mezzanine(td), td)
             with mock.patch("pqloop.runner.vmaf.measure",
-                            return_value=dict(SCORES)):
+                            return_value=dict(SCORES)) as measure:
                 outcome = runner.evaluate(
                     get_space("libx264").defaults(), "baseline")
             self.assertTrue(outcome.ok)
             self.assertEqual(len(ff.calls), 2)
             self.assertEqual(ff.calls[0][0][-2:], ["null", "-"])
             self.assertAlmostEqual(outcome.objective, 80.0)
+            self.assertEqual(measure.call_args.kwargs["crop"],
+                             "960x540+0+540")
             for key in ("encode_time_s", "probe_time_s", "vmaf_time_s",
                         "trial_time_s"):
                 self.assertIn(key, outcome.metrics)
@@ -246,6 +248,22 @@ class SegmentTest(unittest.TestCase):
             cfg, source, "out", fmt="cmaf")
         self.assertEqual(cmaf_args[cmaf_args.index("-tag:v") + 1], "hvc1")
         self.assertIn("-hls_playlist", cmaf_args)
+
+        nvenc = get_space(
+            "hevc_nvenc",
+            "  -tune <int>\n     hq 1\n     uhq 5\n"
+            "  -lookahead_level <int>\n  -tf_level <int>\n")
+        nvenc_params = nvenc.defaults()
+        nvenc_params.update({
+            "tune": "uhq", "lookahead_level": 3, "tf_level": 4,
+            "rc-lookahead": 20, "bf": 4, "refs": 4,
+        })
+        nvenc_args, _, _ = segment.build_encode_args(
+            nvenc, nvenc_params, cfg, source, "out", fmt="mp4")
+        for flag, value in (("-tune", "uhq"),
+                            ("-lookahead_level", "3"),
+                            ("-tf_level", "4"), ("-refs", "4")):
+            self.assertEqual(nvenc_args[nvenc_args.index(flag) + 1], value)
 
         for encoder, passes in (("libx264", 2), ("libx265", 2),
                                 ("libsvtav1", 1)):
@@ -577,7 +595,7 @@ class VmafTest(unittest.TestCase):
             ff = _VmafFF(log, payload)
             scores = vmaf.measure(
                 ff, "distorted.mp4", "reference.mkv", 1920, 1080,
-                log, subsample=5, threads=4,
+                log, "24000/1001", subsample=5, threads=4,
                 model="version=vmaf_4k_v0.6.1")
         self.assertEqual(scores["vmaf_mean"], 90.0)
         self.assertEqual(scores["vmaf_min"], 80.0)
@@ -585,8 +603,34 @@ class VmafTest(unittest.TestCase):
         self.assertAlmostEqual(scores["vmaf_p1"], 80.2)
         self.assertIn("n_subsample=5", ff.graph)
         self.assertIn("n_threads=4", ff.graph)
+        self.assertIn("shortest=1", ff.graph)
+        self.assertIn("repeatlast=0", ff.graph)
         self.assertIn("scale=1920:1080", ff.graph)
+        self.assertEqual(ff.graph.count(
+            "settb=expr=1/24000,setpts=N*1001"), 2)
+        self.assertNotIn("PTS-STARTPTS", ff.graph)
         self.assertEqual(vmaf._fesc("a:b,c'd"), "a\\:b\\,c\\'d")
+
+    def test_crop_filtergraph_and_validation(self):
+        payload = {"frames": [{"metrics": {"vmaf": 95.0}}]}
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "vmaf.json"
+            ff = _VmafFF(log, payload)
+            vmaf.measure(
+                ff, "distorted.mp4", "reference.mkv", 1920, 1080,
+                log, "24000/1001", crop="960x540+0+540")
+        self.assertEqual(ff.graph.count("crop=960:540:0:540"), 2)
+        self.assertIn(
+            "scale=1920:1080:flags=bicubic,crop=960:540:0:540,",
+            ff.graph)
+        self.assertEqual(vmaf.parse_crop("960X540+0+540"),
+                         (960, 540, 0, 540))
+        with self.assertRaisesRegex(ValueError, "must be WxH\\+X\\+Y"):
+            vmaf.parse_crop("960:540:0:540")
+        with self.assertRaisesRegex(ValueError, "must be even"):
+            vmaf.parse_crop("961x540+0+540")
+        with self.assertRaisesRegex(ValueError, "exceeds the 1920x1080"):
+            vmaf.parse_crop("960x540+1000+540", 1920, 1080)
 
 
 if __name__ == "__main__":

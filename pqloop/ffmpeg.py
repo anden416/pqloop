@@ -294,6 +294,20 @@ class FF:
         except (OSError, subprocess.SubprocessError):
             return False
 
+    def encoder_help(self, name) -> str:
+        """Return cached private-option help for one encoder."""
+        key = ("encoder_help", str(name))
+        if key not in self._caps:
+            try:
+                cp = subprocess.run(
+                    [self.ffmpeg, "-hide_banner", "-h", f"encoder={name}"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, timeout=30)
+                self._caps[key] = cp.stdout or "" if cp.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                self._caps[key] = ""
+        return self._caps[key]
+
     def has_muxer(self, name) -> bool:
         try:
             return any(line.split()[1] == name

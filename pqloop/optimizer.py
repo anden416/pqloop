@@ -103,6 +103,12 @@ class Optimizer:
         self.cache = {k: TrialOutcome.from_json(v)
                       for k, v in (st.get("cache") or {}).items()}
         self.sens = {k: float(v) for k, v in (st.get("sens") or {}).items()}
+        if "screened_params" in st:
+            self.screened_params = set(st.get("screened_params") or ())
+        else:
+            # Legacy states used presence in sens as the interrupted-screen
+            # marker. Preserve that resume behavior until the state is saved.
+            self.screened_params = set(self.sens)
         best = st.get("best") or {}
         self.best_params = None
         self.best_objective = NEG_INF
@@ -148,6 +154,7 @@ class Optimizer:
             "current": self.current,
             "cache": {k: v.to_json() for k, v in self.cache.items()},
             "sens": {k: round(v, 4) for k, v in self.sens.items()},
+            "screened_params": sorted(self.screened_params),
             "best": {"params": self.best_params,
                      "objective": None if self.best_objective == NEG_INF else self.best_objective,
                      "metrics": self.best_metrics},
@@ -222,7 +229,7 @@ class Optimizer:
         for spec in self.tunables:
             # Already measured in a previous (interrupted) run: keep that
             # sensitivity and the adoption it led to, don't re-probe.
-            if spec.name in self.sens:
+            if spec.name in self.screened_params:
                 continue
             best_value, best_obj = None, self.cur_obj
             for value in spec.probes:
@@ -237,6 +244,7 @@ class Optimizer:
                     best_obj, best_value = outcome.objective, value
             gain = best_obj - self.cur_obj
             self.sens[spec.name] = max(gain, 0.0)
+            self.screened_params.add(spec.name)
             if best_value is not None and gain > self.s.adopt_eps:
                 cand = dict(self.current)
                 cand[spec.name] = best_value

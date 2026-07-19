@@ -336,9 +336,11 @@ parameter signature (inert knobs stripped: `merange` doesn't count while
 resume free and deterministic. Cache provenance includes the encoder and VMAF
 FFmpeg/ffprobe builds plus a versioned encoder-space definition. Upgrading from
 an older preset therefore re-scores once while keeping its best-known parameters
-and sensitivity order as priors. `--reset-cache` requests the same safe rescore;
-`--cache-salt TEXT` records a driver, firmware, or dynamic-encoder identifier
-for changes that do not appear in `ffmpeg -version`.
+and sensitivity order as priors. The new objective is screened afresh; old
+sensitivities only order those probes. Ladder rungs are the exception: inherited
+sensitivities are explicitly marked as already screened. `--reset-cache`
+requests the same safe rescore; `--cache-salt TEXT` records a driver, firmware,
+or dynamic-encoder identifier for changes that do not appear in `ffmpeg -version`.
 
 **The objective** is the chosen VMAF aggregate (`--metric`) minus a penalty
 when the measured bitrate overshoots the target beyond tolerance
@@ -379,9 +381,22 @@ protecting:
 python3 -m pqloop optimize -p sports --metric p5
 ```
 
+When a localized background or texture is the real failure but the rest of the
+frame dominates VMAF, score only that region with `--vmaf-crop WxH+X+Y`. The
+rectangle uses normalized-reference pixels; all four values must be even for
+yuv420 chroma alignment. This changes measurement only: trials and deliverables
+remain full-frame.
+
+```bash
+# protect the bottom half of a normalized 1920x1080 reference
+python3 -m pqloop optimize -p animation --metric p5 \
+    --vmaf-crop 1920x540+0+540
+```
+
 Changing the metric on an existing preset resets its cached scores (they were
 measured against a different objective) but keeps the best-known parameters
-and impact ordering as the starting point.
+and impact ordering as the starting point, then screens every parameter under
+the new objective. Changing `--vmaf-crop` has the same reset behavior.
 
 ### The reference (mezzanine)
 
@@ -393,6 +408,11 @@ against it, so every trial sees byte-identical reference frames and the
 deinterlace cost is paid once. Reuse is keyed on the content of the source,
 not timestamps, so recapturing identical bytes or copying inputs between
 servers doesn't force a rebuild.
+
+Before scoring, both decoded streams are assigned the same exact
+frame-index-derived clock from the mezzanine's rational frame rate. This avoids
+false frame mismatches when containers quantize timestamps differently, such as
+a millisecond-timebase Matroska reference versus a 24000/1001 MP4 trial.
 
 VMAF uses libvmaf's default model `vmaf_v0.6.1` (the Netflix VMAF v1
 default); override with `--vmaf-model`, e.g. `version=vmaf_4k_v0.6.1` for a
@@ -458,9 +478,15 @@ python3 -m pqloop optimize -i input/match.ts -p sports_av1 \
     --encoder libsvtav1 -b 2500k
 ```
 
-**h264_nvenc / hevc_nvenc**: preset p1-p7, multipass, spatial/temporal AQ,
-lookahead, B-ref. Point `--ffmpeg` at your nvenc-enabled build if the default
-one lacks it.
+**h264_nvenc / hevc_nvenc**: preset p1-p7, HQ tuning, multipass,
+spatial/temporal AQ, lookahead, B-frames/B-ref, and reference-frame count.
+When the selected FFmpeg advertises them, the search also includes UHQ tuning,
+lookahead levels through 3, and temporal filter level 4. Build-specific options
+are discovered with `ffmpeg -h encoder=<name>` and are part of cache provenance;
+GPU-level rejection is recorded as a failed candidate without stopping the run.
+Target-quality `cq` is deliberately not searched because FFmpeg drops the
+average-bitrate target in that mode. Point `--ffmpeg` at your nvenc-enabled
+build if the default one lacks it.
 
 ```bash
 python3 -m pqloop optimize -i input/match.ts -p sports_nv \

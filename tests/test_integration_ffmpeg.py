@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pqloop import vmaf
 from pqloop.encoders import get_space
 from pqloop.ffmpeg import FF
 from pqloop.media import probe_file
@@ -101,6 +102,59 @@ class FFmpegIntegrationTest(unittest.TestCase):
         self.assertTrue(all("pts_time" in row for row in rows))
         self.assertTrue(all(not value.endswith("\n")
                             for row in rows for value in row.values()))
+
+
+@unittest.skipUnless(
+    RUN_INTEGRATION and os.environ.get("PQLOOP_VMAF_FFMPEG"),
+    "set PQLOOP_FFMPEG_INTEGRATION=1 and PQLOOP_VMAF_FFMPEG for VMAF tests")
+class VmafTimingIntegrationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.encode_ff = FF("ffmpeg")
+        cls.measure_ff = FF(os.environ["PQLOOP_VMAF_FFMPEG"])
+        if not cls.encode_ff.has_encoder("libx264"):
+            raise unittest.SkipTest("encode ffmpeg lacks libx264")
+        if not cls.measure_ff.has_filter("libvmaf"):
+            raise unittest.SkipTest("measurement ffmpeg lacks libvmaf")
+
+    def test_matroska_and_mp4_are_aligned_by_frame_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            reference = root / "reference.mkv"
+            distorted = root / "distorted.mp4"
+            shorter = root / "shorter.mp4"
+            log = root / "vmaf.json"
+            self.encode_ff.run([
+                "-y", "-f", "lavfi", "-i",
+                "testsrc2=size=320x180:rate=24000/1001",
+                "-t", "2", "-c:v", "libx264", "-qp", "0",
+                "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-f", "matroska", str(reference),
+            ], timeout=120)
+            self.encode_ff.run([
+                "-y", "-i", str(reference), "-c:v", "libx264",
+                "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p",
+                "-an", "-f", "mp4", str(distorted),
+            ], timeout=120)
+
+            scores = vmaf.measure(
+                self.measure_ff, distorted, reference, 320, 180, log,
+                "24000/1001", timeout=120)
+
+            self.assertEqual(scores["vmaf_frames"], 48)
+            self.assertGreater(scores["vmaf_min"], 50.0)
+            self.assertGreater(scores["vmaf_p5"], 80.0)
+
+            self.encode_ff.run([
+                "-y", "-i", str(reference), "-frames:v", "47",
+                "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                "-pix_fmt", "yuv420p", "-an", "-f", "mp4", str(shorter),
+            ], timeout=120)
+            shorter_scores = vmaf.measure(
+                self.measure_ff, shorter, reference, 320, 180,
+                root / "shorter-vmaf.json", "24000/1001", timeout=120)
+            self.assertEqual(shorter_scores["vmaf_frames"], 47)
+            self.assertGreater(shorter_scores["vmaf_min"], 50.0)
 
 
 if __name__ == "__main__":

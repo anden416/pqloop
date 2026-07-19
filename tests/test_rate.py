@@ -306,6 +306,7 @@ class RatePersistenceTest(unittest.TestCase):
                                        "bitrate_tolerance",
                                        "overshoot_penalty",
                                        "undershoot_penalty", "metric"})
+        self.assertEqual(rate.RATE_SEARCH_SCHEMA, 2)
 
     def test_context_matching_and_point_reuse(self):
         cfg = cli.merge_config({}, {"target_bitrate_kbps": 6000})
@@ -358,6 +359,7 @@ class RateArgvTest(unittest.TestCase):
         ns = parser.parse_args([
             "bitrate", "-p", "demo", "--clip-duration", "10",
             "--metric", "harmonic", "--vmaf-ffmpeg", "tools/ffmpeg",
+            "--vmaf-crop", "960x540+0+540",
             "--keep-trials", "--retune", "--retune-args", "--max-trials 3",
         ])
         argv = rate.retune_argv(ns, "input.ts", 4500)
@@ -367,6 +369,7 @@ class RateArgvTest(unittest.TestCase):
         self.assertEqual(parsed.clip_duration, 10.0)
         self.assertEqual(parsed.metric, "harmonic")
         self.assertEqual(parsed.vmaf_ffmpeg, "tools/ffmpeg")
+        self.assertEqual(parsed.vmaf_crop, "960x540+0+540")
         self.assertTrue(parsed.keep_trials)
         self.assertEqual(parsed.max_trials, 3)
 

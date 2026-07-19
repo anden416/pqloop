@@ -81,6 +81,7 @@ class ConfigurationTest(unittest.TestCase):
             {"scale": "1280:720"}, {"clip_duration": float("nan")},
             {"seg_duration": 4.0, "gop_duration": 3.0},
             {"src_trc": "bt709,evil"}, {"audio_stream": -1},
+            {"vmaf_crop": "961x540+0+540"},
         )
         for override in invalid:
             with self.subTest(override=override), self.assertRaises(ValueError):
@@ -98,6 +99,8 @@ class ConfigurationTest(unittest.TestCase):
         objective = cli.objective_key(base)
         self.assertNotEqual(objective,
                             cli.objective_key(dict(base, two_pass=True)))
+        self.assertNotEqual(objective, cli.objective_key(
+            dict(base, vmaf_crop="960x540+0+540")))
         self.assertEqual(objective,
                          cli.objective_key(dict(base, vmaf_threads=8)))
 
@@ -131,6 +134,7 @@ class ConfigurationTest(unittest.TestCase):
         self.assertNotIn("best", state)
         self.assertEqual(state["current"], {"preset": "slow"})
         self.assertEqual(state["sens"], {"preset": 2.5})
+        self.assertEqual(state["screened_params"], [])
 
         state["cache"] = {"new": 1}
         self.assertEqual(cli.reset_stale_state(
@@ -244,6 +248,7 @@ class LadderTest(unittest.TestCase):
             "ladder", "-p", "demo", "--rung", "1280x720:2800k",
             "--output-dir", "out", "--two-pass",
             "--cache-salt", "driver-550", "--reset-cache",
+            "--vmaf-crop", "960x540+0+540",
         ])
         optimize = ladder.optimize_argv(
             merged[0], command, "input.ts", "work/demo")
@@ -252,7 +257,13 @@ class LadderTest(unittest.TestCase):
         self.assertEqual(parsed.scale, "1280x720")
         self.assertTrue(parsed.two_pass)
         self.assertEqual(parsed.cache_salt, "driver-550")
+        self.assertEqual(parsed.vmaf_crop, "960x540+0+540")
         self.assertTrue(parsed.reset_cache)
+
+        seeded = {}
+        ladder.seed_data(
+            seeded, "demo", {"preset": "slow"}, {"preset": 2.5})
+        self.assertEqual(seeded["optimizer"]["screened_params"], ["preset"])
 
         package_args = ladder.package_argv(
             [rung["preset"] for rung in merged], command, "input.ts")
@@ -295,6 +306,36 @@ class EncoderTest(unittest.TestCase):
         self.assertNotIn("preset", [spec.name for spec in x264.tunable(
             exclude=["preset"], frozen=["psy-rd"])])
 
+        complete = get_space("hevc_nvenc")
+        self.assertIn("uhq", complete.params["tune"].values)
+        self.assertIn("lookahead_level", complete.params)
+        self.assertIn("tf_level", complete.params)
+
+        legacy_help = "  -tune <int>\n     hq 1\n"
+        legacy = get_space("hevc_nvenc", legacy_help)
+        self.assertEqual(legacy.params["tune"].values, ("hq",))
+        self.assertNotIn("lookahead_level", legacy.params)
+        self.assertNotIn("tf_level", legacy.params)
+
+        modern_help = (
+            "  -tune <int>\n     hq 1\n     uhq 5\n"
+            "  -lookahead_level <int>\n  -tf_level <int>\n")
+        modern = get_space("hevc_nvenc", modern_help)
+        self.assertNotEqual(cli._space_key(legacy), cli._space_key(modern))
+        params = modern.defaults()
+        params.update({"lookahead_level": 3, "tf_level": 4,
+                       "rc-lookahead": 0, "bf": 3})
+        self.assertNotIn("lookahead_level", modern.effective(params))
+        self.assertNotIn("tf_level", modern.effective(params))
+        params.update({"rc-lookahead": 20, "bf": 4, "refs": 4})
+        effective = modern.effective(params)
+        self.assertEqual(effective["lookahead_level"], 3)
+        self.assertEqual(effective["tf_level"], 4)
+        generated = modern.video_args(params, rc=rc)
+        self.assertEqual(generated[generated.index("-tune") + 1], "hq")
+        self.assertEqual(generated[generated.index("-refs") + 1], "4")
+        self.assertEqual(generated[generated.index("-tf_level") + 1], "4")
+
 
 class RateCommandTest(unittest.TestCase):
     def test_new_bitrate_resets_scores_but_keeps_priors(self):
@@ -316,6 +357,7 @@ class RateCommandTest(unittest.TestCase):
         self.assertNotIn("best", state)
         self.assertEqual(state["current"], {"preset": "slow"})
         self.assertEqual(state["sens"], {"preset": 2.5})
+        self.assertEqual(state["screened_params"], [])
 
     def test_dry_run_probes_only_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as td:
@@ -383,6 +425,27 @@ class OptimizerTest(unittest.TestCase):
         self.assertFalse(first & second)
         self.assertEqual(len(first_eval.calls) + len(second_eval.calls),
                          len(full_eval.calls))
+
+    def test_sensitivity_prior_does_not_suppress_explicit_rescreen(self):
+        state = {
+            "current": _toy_space().defaults(),
+            "sens": {"speed": 9.0},
+            "screened": False,
+            "screened_params": [],
+        }
+        evaluator = _ToyEvaluator()
+        optimizer = Optimizer(
+            _toy_space(), evaluator,
+            Settings(min_pass_gain=0.2, adopt_eps=0.01, max_trials=2),
+            state=state)
+        self.assertEqual(optimizer.run(), "max_trials")
+        self.assertEqual(evaluator.calls[1]["speed"], 4)
+        self.assertIn("speed", optimizer.state()["screened_params"])
+
+        legacy = Optimizer(
+            _toy_space(), _ToyEvaluator(), Settings(),
+            state={"sens": {"speed": 1.0}})
+        self.assertEqual(legacy.screened_params, {"speed"})
 
     def test_freezes_and_failures_do_not_corrupt_the_best(self):
         evaluator = _ToyEvaluator()

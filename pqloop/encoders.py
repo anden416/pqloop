@@ -12,6 +12,7 @@ settings into concrete ffmpeg arguments, merging private options into a single
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -228,17 +229,37 @@ def _x265_space() -> EncoderSpace:
                         two_pass="kv")
 
 
-def _nvenc_space(codec) -> EncoderSpace:
+def _nvenc_space(codec, encoder_help=None) -> EncoderSpace:
+    def has_option(name):
+        return (encoder_help is None
+                or re.search(rf"(?m)^\s*-{re.escape(name)}(?:\s|$)",
+                             encoder_help) is not None)
+
     P = ParamSpec
     specs = [
         P("preset", ("p1", "p2", "p3", "p4", "p5", "p6", "p7"), "p4",
           emit="flag:-preset", priority=1, probes=("p6",)),
+    ]
+    if has_option("tune"):
+        tunes = ("hq", "uhq") if (encoder_help is None
+                                    or re.search(r"\buhq\b", encoder_help)) \
+            else ("hq",)
+        specs.append(P("tune", tunes, "hq", emit="flag:-tune",
+                       kind="categorical", priority=1, probes=(tunes[-1],)))
+    specs += [
         P("multipass", ("disabled", "qres", "fullres"), "disabled",
           emit="flag:-multipass", kind="categorical", priority=2, probes=("fullres",)),
         P("spatial-aq", (0, 1), 0, emit="flag:-spatial-aq", kind="categorical",
           priority=3, probes=(1,)),
         P("rc-lookahead", (0, 8, 20, 32, 48), 20, emit="flag:-rc-lookahead",
           priority=4, probes=(32,)),
+    ]
+    if has_option("lookahead_level"):
+        specs.append(P(
+            "lookahead_level", (None, 0, 1, 2, 3), None,
+            emit="flag:-lookahead_level", kind="categorical", priority=5,
+            probes=(3,), requires=(("rc-lookahead", (8, 20, 32, 48)),)))
+    specs += [
         P("temporal-aq", (0, 1), 0, emit="flag:-temporal-aq", kind="categorical",
           priority=5, probes=(1,), requires=(("rc-lookahead", (8, 20, 32, 48)),)),
         P("aq-strength", (4, 6, 8, 10, 12, 15), 8, emit="flag:-aq-strength",
@@ -247,7 +268,14 @@ def _nvenc_space(codec) -> EncoderSpace:
         P("b_ref_mode", ("disabled", "middle", "each"), "disabled",
           emit="flag:-b_ref_mode", kind="categorical", priority=7,
           probes=("middle",), requires=(("bf", (2, 3, 4)),)),
+        P("refs", (None, 2, 3, 4), None, emit="flag:-refs",
+          priority=8, probes=(4,)),
     ]
+    if has_option("tf_level"):
+        specs.append(P(
+            "tf_level", (None, 4), None, emit="flag:-tf_level",
+            kind="categorical", priority=9, probes=(4,),
+            requires=(("bf", (4,)),)))
     return EncoderSpace(codec, codec, {s.name: s for s in specs},
                         kv_flag=None,
                         rc_extra=("-rc", "vbr"),
@@ -419,7 +447,9 @@ _BUILDERS = {
 }
 
 
-def get_space(encoder) -> EncoderSpace:
+def get_space(encoder, encoder_help=None) -> EncoderSpace:
+    if encoder in ("h264_nvenc", "hevc_nvenc"):
+        return _nvenc_space(encoder, encoder_help)
     builder = _BUILDERS.get(encoder)
     return builder() if builder else generic_space(encoder)
 
