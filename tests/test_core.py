@@ -296,6 +296,65 @@ class EncoderTest(unittest.TestCase):
             exclude=["preset"], frozen=["psy-rd"])])
 
 
+class RateCommandTest(unittest.TestCase):
+    def test_new_bitrate_resets_scores_but_keeps_priors(self):
+        # the write-back's intended side effect: the next optimize rescores
+        # at the new rate but keeps the priors (the --retune warm start)
+        base = cli.merge_config({}, {"target_bitrate_kbps": 6000})
+        old_key = cli.objective_key(base)
+        new_key = cli.objective_key(dict(base, target_bitrate_kbps=4500))
+        self.assertNotEqual(old_key, new_key)
+        data = {"fingerprint": "fp", "objective_key": old_key}
+        state = {"cache": {"sig": {"ok": True, "objective": 91.0}},
+                 "best": {"params": {"preset": "slow"}, "objective": 91.0},
+                 "current": {"preset": "medium"}, "sens": {"preset": 2.5},
+                 "screened": True, "passes_done": 2}
+        reasons = cli.reset_stale_state(data, state, "fp", new_key,
+                                        lambda message: None)
+        self.assertIn("objective settings changed", reasons)
+        self.assertNotIn("cache", state)
+        self.assertNotIn("best", state)
+        self.assertEqual(state["current"], {"preset": "slow"})
+        self.assertEqual(state["sens"], {"preset": 2.5})
+
+    def test_dry_run_probes_only_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "input.ts"
+            source.write_bytes(b"ts")
+            preset_path = Path(td) / "sweep.json"
+            data = presets.load(preset_path)
+            data["config"] = {"encoder": "libx264",
+                              "target_bitrate_kbps": 6000}
+            presets.save(preset_path, data)
+            before = preset_path.read_bytes()
+            ff = _DryRunFF()
+            output = io.StringIO()
+            argv = ["bitrate", "-p", str(preset_path), "-i", str(source),
+                    "--work-dir", str(Path(td) / "work"), "--dry-run"]
+            with mock.patch.object(cli, "FF", lambda *args, **kwargs: ff), \
+                    mock.patch.object(
+                        cli, "resolve_measure_ff",
+                        side_effect=AssertionError("resolved VMAF ffmpeg")), \
+                    contextlib.redirect_stdout(output):
+                result = cli.main(argv)
+            self.assertEqual(result, 0)
+            self.assertEqual(ff.probed, [str(source)])
+            text = output.getvalue()
+            self.assertIn("planned rates:", text)
+            self.assertIn("anchor 6000k", text)
+            self.assertIn("encode command at", text)
+            self.assertFalse((Path(td) / "work").exists())
+            self.assertEqual(preset_path.read_bytes(), before)
+
+    def test_missing_preset_is_an_error(self):
+        with tempfile.TemporaryDirectory() as td, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            result = cli.main(["bitrate", "-p", str(Path(td) / "nope.json"),
+                               "-i", "clip.ts", "--dry-run"])
+            self.assertEqual(result, 2)
+            self.assertIn("preset not found", err.getvalue())
+
+
 class OptimizerTest(unittest.TestCase):
     def test_search_cache_and_resume(self):
         settings = Settings(min_pass_gain=0.2, adopt_eps=0.01)

@@ -39,6 +39,7 @@ def fresh(name) -> dict:
         "optimizer": {},
         "best": {},
         "runs": [],
+        "rate_search": {},
     }
 
 
@@ -55,7 +56,8 @@ def load(path) -> dict:
             f"preset {path} uses schema {data['preset_schema']}, newer than "
             f"this pqloop supports ({PRESET_SCHEMA})")
     for key, default in (("config", {}), ("optimizer", {}), ("best", {}),
-                         ("runs", []), ("fingerprint", None)):
+                         ("runs", []), ("fingerprint", None),
+                         ("rate_search", {})):
         data.setdefault(key, default)
     return data
 

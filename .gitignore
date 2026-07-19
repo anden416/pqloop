@@ -3,6 +3,7 @@ output/
 work/
 tools/
 stats/
+presets/
 __pycache__/
 *.egg-info/
 *.pyc

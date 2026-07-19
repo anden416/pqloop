@@ -2,7 +2,10 @@
 
 Subcommands:
   optimize  run the VMAF feedback loop on a clip of the input
+  bitrate   sweep bitrates on an optimized preset and pick the one worth paying
   encode    produce the segmented deliverable using a preset's best parameters
+  package   package multiple presets into one ABR HLS/DASH output
+  ladder    optimize every rung of an ABR ladder, then package it
   report    summarize a stats JSONL file (and export CSV)
   presets   list / show saved presets
   probe     inspect an input (resolution, interlacing, fps, audio)
@@ -24,7 +27,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import (__version__, ladder as ladder_mod, media, package, presets,
-               stats as stats_mod, vmaf)
+               rate as rate_mod, stats as stats_mod, vmaf)
 from .encoders import codec_family, get_space, known_encoders
 from .ffmpeg import FF, FFmpegError
 from .optimizer import Optimizer, Settings, NEG_INF, respects_frozen
@@ -1238,6 +1241,436 @@ def _cmd_ladder(a) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# bitrate
+# --------------------------------------------------------------------------- #
+
+def bitrate_cli_cfg(a) -> dict:
+    """The bitrate CLI namespace as a config dict for merge_config (None =
+    flag not given). Deliberately narrow: the sweep measures the preset as
+    tuned, so encoder/rate-shape/GOP knobs stay preset-governed."""
+    return {
+        "clip_start": parse_time_seconds(a.clip_start)
+                      if a.clip_start is not None else None,
+        "clip_duration": a.clip_duration,
+        "program": a.program,
+        "deinterlace": a.deinterlace,
+        "deint_mode": a.deint_mode,
+        "metric": a.metric,
+        "vmaf_model": a.vmaf_model,
+        "vmaf_subsample": a.vmaf_subsample,
+        "vmaf_threads": a.vmaf_threads,
+        "ffmpeg": a.ffmpeg,
+        "ffprobe": a.ffprobe,
+        "vmaf_ffmpeg": a.vmaf_ffmpeg,
+        "cache_salt": a.cache_salt,
+        "keep_trials": a.keep_trials,
+        "extra_input_args": shlex.split(a.extra_input_args)
+                            if a.extra_input_args else None,
+        "src_primaries": a.src_primaries,
+        "src_trc": a.src_trc,
+        "tonemap": a.tonemap,
+        "norm_scale": a.norm_scale,
+        "audio_stream": a.audio_stream,
+        "last_input": a.input,
+    }
+
+
+def bitrate_settings(a, cfg):
+    """RateSettings from the CLI namespace + merged config, with the
+    flag-conflict checks that only the CLI layer can see."""
+    if a.rates and (a.min_rate or a.max_rate or a.rate_points):
+        raise ValueError("--rates replaces the sweep grid; drop "
+                         "--min-rate/--max-rate/--rate-points")
+    if a.retune and a.no_apply:
+        raise ValueError("--retune re-optimizes at the applied bitrate; "
+                         "drop --no-apply")
+    explicit = tuple(parse_bitrate_kbps(part)
+                     for part in str(a.rates).split(",")
+                     if part.strip()) if a.rates else ()
+    kw = {}
+    if a.knee_gain is not None:
+        kw["knee_gain"] = float(a.knee_gain)
+    if a.within_ceiling is not None:
+        kw["ceiling_delta"] = float(a.within_ceiling)
+    if a.rate_points is not None:
+        kw["coarse_points"] = int(a.rate_points)
+    if a.max_trials is not None:
+        kw["encode_budget"] = int(a.max_trials)
+    settings = rate_mod.RateSettings(
+        metric_key=vmaf.METRIC_KEYS[cfg["metric"]],
+        criterion=a.criterion,
+        target_vmaf=a.target_vmaf,
+        min_rate_kbps=parse_bitrate_kbps(a.min_rate) if a.min_rate else 0,
+        max_rate_kbps=parse_bitrate_kbps(a.max_rate) if a.max_rate else 0,
+        explicit_rates=explicit, **kw)
+    rate_mod.validate_settings(settings)
+    return settings
+
+
+def run_sweep(cfg, settings, anchor_kbps, space, params, ff_enc, ff_meas,
+              mezz, workdir, points, on_point, log_fn=log):
+    """Drive the sweep: one fresh RunConfig/TrialRunner per rate (the
+    RateControl is derived at construction time), in per-rate workdirs so
+    trial counters and best_trial.* artifacts never collide — each rate dir
+    keeps its encode for eyeballing. on_point(points, point) runs after
+    every real encode (checkpointing + stats live in the caller). Returns
+    (points, encodes)."""
+    encodes = 0
+    points = sorted(points, key=lambda p: int(p["requested_kbps"]))
+    while True:
+        kbps = rate_mod.next_rate(anchor_kbps, settings, points, encodes)
+        if kbps is None:
+            return points, encodes
+        run_cfg = build_run_cfg(dict(cfg, target_bitrate_kbps=int(kbps)))
+        runner = TrialRunner(run_cfg, ff_enc, ff_meas, space, mezz,
+                             Path(workdir) / "rate" / f"{kbps}k", log_fn)
+        outcome = runner.evaluate(params, f"{kbps}k")
+        point = rate_mod.point_from_outcome(kbps, outcome)
+        points = [p for p in points
+                  if int(p["requested_kbps"]) != int(kbps)] + [point]
+        points.sort(key=lambda p: int(p["requested_kbps"]))
+        encodes += 1
+        on_point(points, point)
+
+
+def cmd_bitrate(a) -> int:
+    if a.dry_run:
+        code, _ = _cmd_bitrate(a)
+        return code
+    preset_path = presets.resolve(a.preset, a.presets_dir)
+    data = presets.load(preset_path)
+    workdir = Path(a.workdir or Path("work") / data["name"])
+    with advisory_lock(_lock_path(preset_path), f"preset {preset_path}"), \
+            advisory_lock(_lock_path(workdir), f"work directory {workdir}"):
+        code, retune = _cmd_bitrate(a)
+    if code or not retune:
+        return code
+    # The chained optimize takes the same preset/workdir locks, so it must
+    # run after ours are released (advisory_lock is fail-fast, not reentrant).
+    log("\nretune: pqloop " + shlex.join(retune))
+    ns = _parse_cli(build_parser(), retune, "retune optimize")
+    code = ns.func(ns)
+    if code == 130:
+        log("interrupted — re-run 'pqloop optimize -p "
+            f"{a.preset}' to resume the retune")
+        return 130
+    if code:
+        return code
+    objective, stop = ladder_mod.rung_outcome(presets.load(preset_path))
+    if objective is None:
+        raise RuntimeError(
+            f"retune finished without a successful encode (stop reason: "
+            f"{stop or 'unknown'}) — fix the cause and re-run "
+            f"'pqloop optimize -p {a.preset}' to resume")
+    return 0
+
+
+def _cmd_bitrate(a):
+    preset_path = presets.resolve(a.preset, a.presets_dir)
+    if not Path(preset_path).exists():
+        raise ValueError(f"preset not found: {preset_path} — a bitrate sweep "
+                         f"measures an optimized preset ('pqloop optimize' "
+                         f"first)")
+    data = presets.load(preset_path)
+    reject_ladder_spec(data, preset_path)
+
+    cfg = merge_config(data.get("config") or {}, bitrate_cli_cfg(a))
+    input_url = a.input or cfg.get("last_input")
+    if not input_url:
+        raise ValueError("no input: pass --input FILE "
+                         "(presets remember their last input)")
+    input_url = media.resolve_input(input_url)
+    if media.is_live_url(input_url):
+        raise ValueError(
+            "bitrate sweeps need a file input — optimize against the live "
+            "url first, then sweep its capture (work/<preset>/capture.ts)")
+    cfg["last_input"] = input_url
+
+    space = get_space(cfg["encoder"])
+    cfg["frozen"] = parse_freezes(space, cfg.get("frozen"), None, None)
+    validate_config(cfg)
+
+    settings = bitrate_settings(a, cfg)
+    anchor = int(cfg.get("target_bitrate_kbps") or 0)
+    plan = rate_mod.plan_rates(anchor, settings)
+    params = preset_params(data, space, data["name"])
+    params_sig = json.dumps(space.effective(params), sort_keys=True,
+                            default=str)
+
+    if a.retune:
+        # Pre-flight with a placeholder rate: a typo in --retune-args must
+        # fail before any encode is spent (the ladder lesson).
+        _parse_cli(build_parser(), rate_mod.retune_argv(a, input_url, plan[-1]),
+                   "retune optimize")
+
+    ff_enc = FF(cfg["ffmpeg"] or "ffmpeg", cfg["ffprobe"] or None)
+    if not a.dry_run and not ff_enc.has_encoder(cfg["encoder"]):
+        raise RuntimeError(f"encoder {cfg['encoder']!r} not available in "
+                           f"{cfg['ffmpeg']} ({ff_enc.version()})")
+
+    workdir = Path(a.workdir or Path("work") / data["name"])
+    mezz_dir = Path(a.mezz_dir) if a.mezz_dir else workdir
+
+    if a.dry_run:
+        # Genuinely dry, like optimize: probe only; nothing resolved, built,
+        # or written.
+        src = media.probe_file(ff_enc, input_url, program=cfg.get("program"),
+                               audio_stream=cfg.get("audio_stream"))
+        deinterlaced = media.deinterlace_decision(src, cfg["deinterlace"])
+        fps, fps_str = media.output_fps(src.fps, src.fps_str, deinterlaced,
+                                        cfg["deint_mode"])
+        norm_w, norm_h = media.norm_dims(src, cfg)
+        mezz = media.MezzInfo(
+            path=str(mezz_dir / "mezz.mkv"), width=norm_w, height=norm_h,
+            fps=fps, fps_str=fps_str, duration=float(cfg["clip_duration"]),
+            fingerprint="", deinterlaced=deinterlaced,
+            filters=",".join(media.normalization_filters(src, cfg)),
+            inputs_key="")
+        log(f"planned rates: {', '.join(f'{r}k' for r in plan)}"
+            + (f"  (anchor {anchor}k)" if anchor in plan else "")
+            + f"  budget {settings.encode_budget} encodes")
+        stored = (data.get("rate_search") or {}).get("points") or []
+        if stored:
+            log(f"stored points: {len(stored)} (reused when the clip, "
+                f"parameters and toolchain still match)")
+        demo = anchor if anchor in plan else plan[-1]
+        runner = TrialRunner(build_run_cfg(dict(cfg, target_bitrate_kbps=demo)),
+                             ff_enc, ff_enc, space, mezz, workdir, log)
+        out = workdir / "rate" / f"{demo}k" / "trials" / "tXXXX.mp4"
+        if runner._two_pass:
+            passlog = out.with_suffix(".passlog")
+            log(f"encode commands at {demo}k:")
+            for pass_num in (1, 2):
+                cmd = [cfg["ffmpeg"] or "ffmpeg", "-hide_banner", "-nostdin",
+                       *runner.encode_args(params, out, pass_num, passlog)]
+                log(f"  pass {pass_num}: " + shlex.join(str(c) for c in cmd))
+        else:
+            cmd = [cfg["ffmpeg"] or "ffmpeg", "-hide_banner", "-nostdin",
+                   *runner.encode_args(params, out)]
+            log(f"encode command at {demo}k:")
+            log("  " + shlex.join(str(c) for c in cmd))
+        return 0, None
+
+    ff_meas = resolve_measure_ff(cfg)
+    workdir.mkdir(parents=True, exist_ok=True)
+    mezz_dir.mkdir(parents=True, exist_ok=True)
+
+    src, _ = prepare_source(ff_enc, cfg, input_url, mezz_dir)
+    norm = media.normalization_filters(src, cfg)
+    builder_ff = mezz_builder_ff(ff_enc, ff_meas)
+    if norm:
+        require_norm_caps(builder_ff, norm, "mezzanine")
+    mezz = media.get_or_build_mezzanine(
+        builder_ff, src, start=float(cfg["clip_start"]),
+        duration=float(cfg["clip_duration"]),
+        deint=cfg["deinterlace"], deint_mode=cfg["deint_mode"],
+        out_path=mezz_dir / "mezz.mkv", norm_filters=norm, log=log)
+
+    context = rate_mod.sweep_context(
+        cfg, params_sig, _space_key(space), ff_enc.identity(),
+        ff_meas.identity(), mezz.fingerprint)
+    reused, reasons = rate_mod.usable_points(data.get("rate_search"), context)
+    if reasons:
+        log("; ".join(reasons) + " -> starting a fresh rate curve")
+    cached_points = sorted(reused.values(),
+                           key=lambda p: int(p["requested_kbps"]))
+    points = rate_mod.points_for_plan(cached_points, plan)
+    if anchor and anchor in plan and anchor not in reused:
+        # The anchor's score is often free: the preset best carries the same
+        # params' metrics at this rate, valid while the trial provenance holds.
+        best = data.get("best") or {}
+        best_metrics = best.get("metrics") or {}
+        best_sig = json.dumps(space.effective(best.get("params") or {}),
+                              sort_keys=True, default=str)
+        if (best_sig == params_sig
+                and best_metrics.get("bitrate_kbps")
+                and best_metrics.get(settings.metric_key) is not None
+                and data.get("trial_context") == trial_context(
+                    cfg, space, ff_enc, ff_meas, mezz.fingerprint)):
+            seeded = {"requested_kbps": anchor, "ok": True,
+                      "source": "preset_best",
+                      "metrics": dict(best_metrics), "error": "",
+                      "measured_at": now_iso()}
+            points.append(seeded)
+            cached_points.append(seeded)
+            points.sort(key=lambda p: int(p["requested_kbps"]))
+            cached_points.sort(key=lambda p: int(p["requested_kbps"]))
+            log(f"seeded {anchor}k from the preset's best result (no encode)")
+
+    inactive_points = len(cached_points) - len(points)
+    if inactive_points:
+        log(f"retaining {inactive_points} stored rate point(s) outside the "
+            f"active {plan[0]}k..{plan[-1]}k range; excluded from this "
+            f"decision")
+    cached_by_rate = {int(p["requested_kbps"]): p for p in cached_points}
+
+    data["rate_search"] = {"schema": rate_mod.RATE_SEARCH_SCHEMA,
+                           "context": context, "points": cached_points,
+                           "result": {}}
+    presets.save(preset_path, data)
+
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(data["name"])).strip("._") \
+        or "preset"
+    run_id = f"{run_stamp()}_{safe_name}_rate"
+    stats = stats_mod.StatsWriter(a.stats_dir or "stats", run_id)
+    stats.event("meta", schema=stats_mod.SCHEMA, pqloop=__version__, config=cfg,
+                **stats_mod.host_meta(), source=asdict(src),
+                mezzanine=asdict(mezz), encode_ffmpeg=ff_enc.version(),
+                vmaf_ffmpeg=ff_meas.version(), rates_planned=plan,
+                params=space.effective(params))
+
+    criterion_blurb = {
+        "knee": f"(diminishing returns below {settings.knee_gain:g} vmaf/Mbps)",
+        "target": f"(cheapest rate with {settings.metric_key} >= "
+                  f"{settings.target_vmaf:g})"
+                  if settings.target_vmaf is not None else "",
+        "ceiling": f"(within {settings.ceiling_delta:g} of the range ceiling)",
+    }[settings.criterion]
+    log(f"pqloop {__version__} — rate sweep {run_id}")
+    log(f"  source:    {src.path}  {src.width}x{src.height} {src.field_order} "
+        f"{src.fps:g}fps")
+    log(f"  reference: {mezz.path}  {mezz.width}x{mezz.height} "
+        f"{mezz.fps:g}fps {mezz.duration:.1f}s")
+    log(f"  encoder:   {cfg['encoder']}, parameters fixed at the preset's "
+        f"best; metric vmaf {cfg['metric']}")
+    log(f"  plan:      {', '.join(f'{r}k' for r in plan)} "
+        f"(budget {settings.encode_budget} encodes"
+        + (f", {len(points)} stored/seeded" if points else "") + ")")
+    log(f"  criterion: {settings.criterion} {criterion_blurb}")
+    log("")
+
+    counter = {"n": 0}
+    real = {"n": 0}
+
+    def emit(point, cached):
+        counter["n"] += 1
+        n = counter["n"]
+        m = point.get("metrics") or {}
+        label = f"{point['requested_kbps']}k"
+        if point.get("ok"):
+            log(f"[{n:3d}] rate     {label:<24} "
+                f"vmaf {m.get('vmaf_mean', 0):6.2f} "
+                f"hm {m.get('vmaf_harmonic', 0):6.2f} "
+                f"p1 {m.get('vmaf_p1', 0):6.2f}  "
+                f"{m.get('bitrate_kbps', 0):6.0f}k "
+                f"{m.get('encode_time_s', 0):6.1f}s"
+                + (" (stored)" if cached else ""))
+        else:
+            log(f"[{n:3d}] rate     {label:<24} FAILED: "
+                f"{(point.get('error') or '')[:90]}")
+        stats.event("trial", n=n, phase="rate", label=label, cached=cached,
+                    ok=bool(point.get("ok")), objective=m.get("objective"),
+                    params=space.effective(params), metrics=m,
+                    error=point.get("error") or "")
+
+    for point in points:
+        emit(point, cached=True)
+
+    def _sigterm(_sig, _frame):
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, _sigterm)
+    except (ValueError, OSError):
+        pass  # not the main thread / unsupported platform
+
+    started = time.monotonic()
+    started_iso = now_iso()
+    stop_reason = "completed"
+    exit_code = 0
+    retune = None
+    try:
+        def on_point(all_points, point):
+            real["n"] += 1
+            # Crash/kill safety: every encode is expensive — persist as we go.
+            for measured in all_points:
+                cached_by_rate[int(measured["requested_kbps"])] = measured
+            data["rate_search"]["points"] = sorted(
+                cached_by_rate.values(),
+                key=lambda p: int(p["requested_kbps"]))
+            presets.save(preset_path, data)
+            emit(point, cached=False)
+
+        points, _ = run_sweep(cfg, settings, anchor, space, params, ff_enc,
+                              ff_meas, mezz, workdir, points, on_point)
+
+        analysis = rate_mod.analyze(settings, points)
+        for warning in analysis.warnings:
+            log("note: " + warning)
+        if len(analysis.points) < 2:
+            stop_reason = "insufficient_points"
+            raise RuntimeError("fewer than 2 rate points measured "
+                               "successfully — cannot analyze the curve")
+        log("")
+        log(f"rate-quality curve (vmaf {cfg['metric']} vs measured kbps):")
+        for line in rate_mod.table_lines(analysis, settings, anchor):
+            log("   " + line)
+        pick = analysis.picks[settings.criterion]
+        applied = False
+        if pick.kbps is None:
+            log(f"\nno {settings.criterion} pick: {pick.note}")
+            exit_code = 1
+        else:
+            log(f"\nchosen: {pick.kbps}k ({settings.criterion}: {pick.note})")
+            for name in rate_mod.CRITERIA:
+                if name == settings.criterion:
+                    continue
+                if name == "target" and settings.target_vmaf is None:
+                    continue
+                other = analysis.picks[name]
+                log(f"  {name}: " + (f"{other.kbps}k — {other.note}"
+                                     if other.kbps is not None else other.note))
+            if a.no_apply:
+                log("--no-apply: preset bitrate left unchanged")
+            else:
+                data["config"]["target_bitrate_kbps"] = int(pick.kbps)
+                data["config"]["last_input"] = input_url
+                applied = True
+                log(f"applied {pick.kbps}k -> {preset_path} (the next "
+                    f"optimize rescores at the new rate; best parameters and "
+                    f"impact ordering carry over as the warm start)")
+        data["rate_search"]["result"] = {
+            "criterion": settings.criterion, "chosen_kbps": pick.kbps,
+            "applied": applied, "previous_kbps": anchor or None,
+            "picks": {k: v.kbps for k, v in analysis.picks.items()},
+            "notes": {k: v.note for k, v in analysis.picks.items()},
+            "satisfied": pick.satisfied,
+            "thresholds": {"knee_gain": settings.knee_gain,
+                           "target_vmaf": settings.target_vmaf,
+                           "within_ceiling": settings.ceiling_delta},
+            "metric": cfg["metric"], "rates_requested": plan,
+            "warnings": list(analysis.warnings),
+            "run_id": run_id, "decided_at": now_iso(),
+        }
+        stats.event("rate_result", **data["rate_search"]["result"])
+        if applied and a.retune and exit_code == 0:
+            retune = rate_mod.retune_argv(a, input_url, int(pick.kbps))
+    except KeyboardInterrupt:
+        log("\ninterrupted — saving state; re-run to resume the sweep")
+        stop_reason = "interrupted"
+        exit_code = 130
+    finally:
+        elapsed = time.monotonic() - started
+        data["runs"].append({
+            "run_id": run_id, "started": started_iso, "ended": now_iso(),
+            "input": input_url, "clip_start": cfg["clip_start"],
+            "clip_duration": cfg["clip_duration"], "encodes": real["n"],
+            "stop_reason": stop_reason, "elapsed_s": round(elapsed, 1),
+            "command": "bitrate",
+        })
+        presets.save(preset_path, data)
+        stats.event("done", stop_reason=stop_reason,
+                    elapsed_s=round(elapsed, 1), encodes=real["n"])
+        stats.close()
+        csv_path = stats_mod.to_csv(stats.path)
+
+    log("")
+    log(f"preset: {preset_path}")
+    log(f"stats:  {stats.path}  |  {csv_path}")
+    return exit_code, retune
+
+
+# --------------------------------------------------------------------------- #
 # report / presets / probe
 # --------------------------------------------------------------------------- #
 
@@ -1586,6 +2019,81 @@ def build_parser() -> argparse.ArgumentParser:
     la.add_argument("--clean", action="store_true")
     la.add_argument("--no-verify", action="store_true")
     la.set_defaults(func=cmd_ladder)
+
+    bt = sub.add_parser("bitrate",
+                        help="sweep bitrates on an optimized preset and pick "
+                             "the one worth paying (VMAF vs rate curve)")
+    bt.add_argument("-p", "--preset", required=True,
+                    help="optimized preset to sweep (name or path)")
+    bt.add_argument("--presets-dir", default="presets")
+    bt.add_argument("-i", "--input",
+                    help="input file (default: preset's last input; live "
+                         "urls are rejected — sweep their capture instead)")
+    bt.add_argument("--rates",
+                    help="explicit rates to sample, e.g. 2000k,4000k,6000k "
+                         "(replaces the auto range)")
+    bt.add_argument("--min-rate",
+                    help="sweep floor (default 0.35x the preset bitrate)")
+    bt.add_argument("--max-rate",
+                    help="sweep ceiling (default 1.6x the preset bitrate)")
+    bt.add_argument("--rate-points", type=int,
+                    help="coarse grid size incl. endpoints (default 5)")
+    bt.add_argument("--max-trials", type=int,
+                    help="total encode budget incl. refinement (default 7); "
+                        "stored points are free")
+    bt.add_argument("--criterion", choices=rate_mod.CRITERIA, default="knee",
+                    help="which pick is applied to the preset (default knee; "
+                         "every criterion is still reported)")
+    bt.add_argument("--knee-gain", type=float,
+                    help="diminishing-returns threshold in VMAF points per "
+                         "Mbps (default 1.5)")
+    bt.add_argument("--target-vmaf", type=float,
+                    help="quality floor for --criterion target, on the "
+                         "preset's metric aggregate")
+    bt.add_argument("--within-ceiling", type=float,
+                    help="Δ below the top-of-range score for --criterion "
+                         "ceiling (default 1.0)")
+    bt.add_argument("--no-apply", action="store_true",
+                    help="report only; don't write the chosen bitrate into "
+                         "the preset")
+    bt.add_argument("--retune", action="store_true",
+                    help="after applying, re-run optimize at the chosen "
+                         "bitrate (warm-started)")
+    bt.add_argument("--retune-args",
+                    help="extra raw flags for the chained optimize run, "
+                         "e.g. '--max-trials 40'")
+    bt.add_argument("--clip-start", help="clip start in source (seconds or HH:MM:SS)")
+    bt.add_argument("--clip-duration", type=float,
+                    help="sweep clip length in seconds (default: preset's)")
+    bt.add_argument("--program", type=int,
+                    help="MPTS input: transport stream program to probe")
+    _add_source_args(bt)
+    bt.add_argument("--deinterlace", choices=("auto", "on", "off"))
+    bt.add_argument("--deint-mode", choices=("field", "frame"))
+    bt.add_argument("--metric", choices=sorted(vmaf.METRIC_KEYS),
+                    help="vmaf aggregate driving the decision "
+                         "(default: preset's)")
+    bt.add_argument("--vmaf-model")
+    bt.add_argument("--vmaf-subsample", type=int)
+    bt.add_argument("--vmaf-threads", type=int)
+    bt.add_argument("--ffmpeg", help="encode ffmpeg binary")
+    bt.add_argument("--ffprobe")
+    bt.add_argument("--vmaf-ffmpeg", help="measurement ffmpeg with libvmaf "
+                                          "(auto-detected if omitted)")
+    bt.add_argument("--cache-salt")
+    bt.add_argument("--work-dir", "--workdir", dest="workdir",
+                    help="working directory (default work/<preset>)")
+    bt.add_argument("--mezz-dir",
+                    help="directory for the mezzanine (default: the work "
+                         "dir); share it with optimize to reuse the clip")
+    bt.add_argument("--stats-dir", help="statistics directory (default stats/)")
+    bt.add_argument("--keep-trials", action=Bool, default=None,
+                    help="keep every rate-point encode + per-frame vmaf log")
+    bt.add_argument("--extra-input-args")
+    bt.add_argument("--dry-run", action="store_true",
+                    help="print the planned rates + baseline encode command "
+                         "and exit")
+    bt.set_defaults(func=cmd_bitrate)
 
     r = sub.add_parser("report", help="summarize a stats .jsonl (writes CSV too)")
     r.add_argument("stats_file")

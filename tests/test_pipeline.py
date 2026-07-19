@@ -1,15 +1,17 @@
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from pqloop import media, package, segment, vmaf
+from pqloop import cli, media, package, rate, segment, vmaf
 from pqloop.cli import preset_params
 from pqloop.encoders import get_space
 from pqloop.ffmpeg import FFmpegError
 from pqloop.media import MezzInfo, SourceInfo
 from pqloop.runner import RunConfig, TrialRunner
+from pqloop.util import parse_bitrate_kbps
 
 
 SCORES = {
@@ -408,6 +410,93 @@ seg_00000.m4s
         }
         with self.assertRaisesRegex(ValueError, "violates its frozen"):
             preset_params(invalid, space, log_fn=lambda message: None)
+
+
+class _RateFF(_FakeFF):
+    """Measured bitrate tracks whatever -b:v the encode requested."""
+
+    def __init__(self, duration=5.0):
+        super().__init__(duration=duration)
+        self.last_kbps = 0
+
+    def run(self, args, timeout=None):
+        args = [str(arg) for arg in args]
+        if "-b:v" in args:
+            self.last_kbps = parse_bitrate_kbps(args[args.index("-b:v") + 1])
+            self.size = int(self.last_kbps * 1000.0 * self.duration / 8.0)
+        super().run(args, timeout)
+
+
+def _rate_scores(kbps):
+    score = 100.0 - 60.0 * math.exp(-kbps / 2000.0)
+    return {"vmaf_mean": round(score, 3),
+            "vmaf_harmonic": round(score - 0.5, 3),
+            "vmaf_min": round(score - 5.0, 3),
+            "vmaf_p1": round(score - 3.0, 3),
+            "vmaf_p5": round(score - 2.0, 3),
+            "vmaf_frames": 250}
+
+
+class RateSweepTest(unittest.TestCase):
+    def test_sweep_assembles_the_curve_from_real_runners(self):
+        with tempfile.TemporaryDirectory() as td:
+            ff = _RateFF()
+            space = get_space("libx264")
+            cfg = cli.merge_config({}, {"target_bitrate_kbps": 5000})
+            settings = rate.RateSettings(encode_budget=12)
+            mezz = _mezzanine(td)
+            workdir = Path(td) / "work"
+            checkpoints = []
+
+            def on_point(points, point):
+                checkpoints.append((len(points), point["requested_kbps"]))
+
+            with mock.patch("pqloop.runner.vmaf.measure",
+                            side_effect=lambda *args, **kwargs:
+                            dict(_rate_scores(ff.last_kbps))):
+                points, encodes = cli.run_sweep(
+                    cfg, settings, 5000, space, space.defaults(), ff, ff,
+                    mezz, workdir, [], on_point,
+                    log_fn=lambda message: None)
+
+            self.assertEqual(len(checkpoints), encodes)
+            self.assertLessEqual(encodes, settings.encode_budget)
+            for point in points:
+                self.assertTrue(point["ok"])
+                self.assertAlmostEqual(point["metrics"]["bitrate_kbps"],
+                                       point["requested_kbps"], delta=1.0)
+                rate_dir = workdir / "rate" / f"{point['requested_kbps']}k"
+                self.assertTrue((rate_dir / "best_trial.mp4").exists())
+            analysis = rate.analyze(settings, points)
+            knee = analysis.picks["knee"]
+            self.assertTrue(knee.satisfied)
+            self.assertIn(knee.kbps, {p["requested_kbps"] for p in points})
+
+    def test_a_complete_stored_curve_re_encodes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            ff = _RateFF()
+            space = get_space("libx264")
+            cfg = cli.merge_config({}, {"target_bitrate_kbps": 5000})
+            settings = rate.RateSettings(encode_budget=12)
+            mezz = _mezzanine(td)
+            with mock.patch("pqloop.runner.vmaf.measure",
+                            side_effect=lambda *args, **kwargs:
+                            dict(_rate_scores(ff.last_kbps))):
+                points, encodes = cli.run_sweep(
+                    cfg, settings, 5000, space, space.defaults(), ff, ff,
+                    mezz, Path(td) / "work", [], lambda *args: None,
+                    log_fn=lambda message: None)
+            self.assertGreater(encodes, 0)
+
+            fresh_ff = _RateFF()
+            resumed, second = cli.run_sweep(
+                cfg, settings, 5000, space, space.defaults(), fresh_ff,
+                fresh_ff, mezz, Path(td) / "work2", points,
+                lambda *args: self.fail("re-encoded a stored point"),
+                log_fn=lambda message: None)
+            self.assertEqual(second, 0)
+            self.assertEqual(fresh_ff.calls, [])
+            self.assertEqual(len(resumed), len(points))
 
 
 class _VmafFF:
