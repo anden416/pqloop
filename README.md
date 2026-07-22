@@ -330,6 +330,25 @@ Not random, and not exhaustive:
    passes (default 6). Budgets (`--max-trials`, `--max-seconds`,
    `--target-score`) also stop the run; resuming continues the same walk.
 
+Greedy refinement changes one knob at a time. If two individually worse
+changes can win together, use `--deep-search`: after the normal pass it
+deterministically evaluates every globally different single value and every
+two-parameter combination around the current winner. A full sweep is large —
+around 1,700 candidates for libx264, several hundred for the smaller spaces —
+and
+every adoption restarts it around the new winner, so bound the run with
+`--max-trials` unless trial encodes are cheap. Singles and high-sensitivity
+pairs are tried first (nearest ordinal steps before far ones), so a bounded
+run spends its budget where interactions are most likely. The existing trial
+cache makes interrupted deep runs resumable; `--max-trials` counts only new
+encodes in that invocation.
+
+```bash
+# Spend up to 150 new encodes crossing one- and two-knob interaction valleys.
+python3 -m pqloop optimize -p animation --deep-search --max-trials 150
+# Re-run the same command to continue if the first 150 trials hit the budget.
+```
+
 Every evaluated configuration is cached in the preset by its effective
 parameter signature (inert knobs stripped: `merange` doesn't count while
 `me=hex`), so nothing is ever encoded twice. That cache is also what makes
@@ -541,6 +560,9 @@ python3 -m pqloop optimize -p sports --freeze psy-rd=1.0
 
 # skip screening (e.g. when resuming with known sensitivities)
 python3 -m pqloop optimize -p sports --no-screen
+
+# continue beyond greedy convergence with bounded pairwise exploration
+python3 -m pqloop optimize -p sports --deep-search --max-trials 150
 
 # pass raw ffmpeg args into every trial AND the final encode
 python3 -m pqloop optimize -p sports --extra-video-args "-flags +cgop"

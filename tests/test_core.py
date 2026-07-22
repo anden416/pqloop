@@ -248,7 +248,7 @@ class LadderTest(unittest.TestCase):
             "ladder", "-p", "demo", "--rung", "1280x720:2800k",
             "--output-dir", "out", "--two-pass",
             "--cache-salt", "driver-550", "--reset-cache",
-            "--vmaf-crop", "960x540+0+540",
+            "--vmaf-crop", "960x540+0+540", "--deep-search",
         ])
         optimize = ladder.optimize_argv(
             merged[0], command, "input.ts", "work/demo")
@@ -258,6 +258,7 @@ class LadderTest(unittest.TestCase):
         self.assertTrue(parsed.two_pass)
         self.assertEqual(parsed.cache_salt, "driver-550")
         self.assertEqual(parsed.vmaf_crop, "960x540+0+540")
+        self.assertTrue(parsed.deep_search)
         self.assertTrue(parsed.reset_cache)
 
         seeded = {}
@@ -446,6 +447,61 @@ class OptimizerTest(unittest.TestCase):
             _toy_space(), _ToyEvaluator(), Settings(),
             state={"sens": {"speed": 1.0}})
         self.assertEqual(legacy.screened_params, {"speed"})
+
+    def test_deep_search_crosses_pairwise_valley(self):
+        specs = [
+            ParamSpec("left", (0, 1), 0, probes=(1,)),
+            ParamSpec("right", (0, 1), 0, probes=(1,)),
+        ]
+        space = EncoderSpace(
+            "valley", "valley", {spec.name: spec for spec in specs})
+
+        def evaluate(params, label):
+            enabled = params["left"] + params["right"]
+            score = {0: 10.0, 1: 9.0, 2: 12.0}[enabled]
+            return TrialOutcome(ok=True, objective=score,
+                                metrics={"score": score})
+
+        greedy = Optimizer(
+            space, evaluate,
+            Settings(min_pass_gain=0.1, adopt_eps=0.01))
+        self.assertEqual(greedy.run(), "diminishing_returns")
+        self.assertEqual(greedy.best_objective, 10.0)
+
+        deep = Optimizer(
+            space, evaluate,
+            Settings(min_pass_gain=0.1, adopt_eps=0.01,
+                     deep_search=True))
+        self.assertEqual(deep.run(), "deep_converged")
+        self.assertEqual(deep.best_params, {"left": 1, "right": 1})
+        self.assertEqual(deep.best_objective, 12.0)
+
+        first_calls = []
+
+        def first_evaluate(params, label):
+            first_calls.append(dict(params))
+            return evaluate(params, label)
+
+        partial = Optimizer(
+            space, first_evaluate,
+            Settings(min_pass_gain=0.1, adopt_eps=0.01,
+                     max_trials=3, screen=False, deep_search=True))
+        self.assertEqual(partial.run(), "max_trials")
+        self.assertEqual(len(first_calls), 3)
+        resumed_calls = []
+
+        def resumed_evaluate(params, label):
+            resumed_calls.append(dict(params))
+            return evaluate(params, label)
+
+        resumed = Optimizer(
+            space, resumed_evaluate,
+            Settings(min_pass_gain=0.1, adopt_eps=0.01,
+                     screen=False, deep_search=True),
+            state=json.loads(json.dumps(partial.state())))
+        self.assertEqual(resumed.run(), "deep_converged")
+        self.assertEqual(resumed.best_params, {"left": 1, "right": 1})
+        self.assertEqual(resumed_calls, [{"left": 1, "right": 1}])
 
     def test_freezes_and_failures_do_not_corrupt_the_best(self):
         evaluator = _ToyEvaluator()

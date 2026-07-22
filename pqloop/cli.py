@@ -797,6 +797,7 @@ def _cmd_optimize(a) -> int:
         target_score=float(a.target_score or 0),
         max_passes=int(cfg["max_passes"]),
         screen=not a.no_screen,
+        deep_search=bool(a.deep_search),
     )
     opt = Optimizer(space, runner.evaluate, settings, state=opt_state,
                     include=cfg["tune_params"] or None,
@@ -1893,6 +1894,9 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--max-passes", type=int, help="refinement pass budget (default 6)")
     o.add_argument("--no-screen", action="store_true",
                    help="skip the sensitivity screening phase")
+    o.add_argument("--deep-search", action="store_true",
+                   help="after greedy refinement, exhaust single and pair "
+                        "parameter combinations until the trial budget is used")
     o.add_argument("--tune-params", help="only tune these (comma separated)")
     o.add_argument("--exclude-params", help="never tune these (comma separated)")
     o.add_argument("--freeze", action="append", metavar="NAME=VALUE",
@@ -2064,6 +2068,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "reach a score chosen for the top rung)")
     la.add_argument("--max-passes", type=int)
     la.add_argument("--no-screen", action="store_true")
+    la.add_argument("--deep-search", action="store_true")
     la.add_argument("--freeze", action="append", metavar="NAME=VALUE")
     la.add_argument("--keep-trials", action=Bool, default=None)
     la.add_argument("--vmaf-model")

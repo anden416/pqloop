@@ -207,6 +207,8 @@ def optimize_argv(rung, a, input_url, work_root, live=False) -> list:
     argv += _tristate("--keep-trials", a.keep_trials)
     if a.no_screen:
         argv += ["--no-screen"]
+    if a.deep_search:
+        argv += ["--deep-search"]
     if getattr(a, "reset_cache", False):
         argv += ["--reset-cache"]
     for item in a.freeze or []:

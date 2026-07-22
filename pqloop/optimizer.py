@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from itertools import combinations
 
 NEG_INF = float("-inf")
 
@@ -82,6 +83,7 @@ class Settings:
     target_score: float = 0.0     # stop once best objective reaches this; 0 = off
     max_passes: int = 6
     screen: bool = True
+    deep_search: bool = False      # exhaust single + pair perturbations after refinement
 
 
 class Optimizer:
@@ -217,7 +219,11 @@ class Optimizer:
                 self.log("— screening: measuring parameter impact —")
                 self._screen()
                 self.screened = True
-            self.stop_reason = self._refine()
+            reason = self._refine()
+            if self.s.deep_search and reason in (
+                    "converged", "diminishing_returns", "max_passes"):
+                reason = self._deep_refine()
+            self.stop_reason = reason
         except StopSearch as exc:
             self.stop_reason = exc.reason
         except KeyboardInterrupt:
@@ -318,3 +324,67 @@ class Optimizer:
                     else:
                         break
         return max(0.0, self.cur_obj - start_obj)
+
+    def _deep_values(self, spec, current):
+        values = [value for value in spec.values if value != current]
+        if spec.kind != "ordinal" or current not in spec.values:
+            return values
+        current_index = spec.values.index(current)
+        return sorted(values, key=lambda value: (
+            abs(spec.values.index(value) - current_index),
+            spec.values.index(value)))
+
+    def _deep_candidates(self, anchor):
+        order = sorted(self.tunables,
+                       key=lambda spec: (-self.sens.get(spec.name, 0.0),
+                                         spec.priority))
+        values = {spec.name: self._deep_values(spec, anchor.get(spec.name))
+                  for spec in order}
+        for spec in order:
+            for value in values[spec.name]:
+                cand = dict(anchor)
+                cand[spec.name] = value
+                if self.space.candidate_valid(cand, spec):
+                    yield cand, f"{spec.name}={value}"
+        for one, two in combinations(order, 2):
+            for v1 in values[one.name]:
+                for v2 in values[two.name]:
+                    cand = dict(anchor)
+                    cand[one.name], cand[two.name] = v1, v2
+                    if (self.space.candidate_valid(cand, one)
+                            and self.space.candidate_valid(cand, two)):
+                        yield cand, f"{one.name}={v1},{two.name}={v2}"
+
+    def _deep_refine(self) -> str:
+        round_number = 0
+        while True:
+            round_number += 1
+            anchor = dict(self.current)
+            anchor_sig = self.signature(anchor)
+            best_params = anchor
+            best_objective = self.cur_obj
+            seen = set()
+            self.log(f"— deep search round {round_number}: "
+                     "single and pair perturbations —")
+            for candidate, label in self._deep_candidates(anchor):
+                signature = self.signature(candidate)
+                if signature == anchor_sig or signature in seen:
+                    continue
+                seen.add(signature)
+                if signature in self.cache:
+                    # Deliberately bypass _eval for cache hits: rounds after an
+                    # adoption (and resumed rounds) re-check thousands of known
+                    # candidates, and routing them through on_trial would
+                    # re-log and re-record every one.
+                    outcome = self.cache[signature]
+                else:
+                    outcome = self._eval(candidate, "deep", label)
+                if outcome.ok and outcome.objective > best_objective:
+                    best_params = dict(candidate)
+                    best_objective = outcome.objective
+            if best_objective - self.cur_obj > self.s.adopt_eps:
+                gain = best_objective - self.cur_obj
+                self._adopt(best_params, best_objective)
+                self.log(f"  adopted deep combination (+{gain:.2f})")
+                continue
+            return "deep_converged"
